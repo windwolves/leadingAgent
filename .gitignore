@@ -48,3 +48,7 @@ build/
 
 # Cost database
 cost.db
+
+# Test files
+cmd/test/
+test_output/
