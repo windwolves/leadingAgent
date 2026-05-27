@@ -1,0 +1,50 @@
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.out
+*.a
+
+# Go build artifacts
+go.sum
+vendor/
+__debug_bin
+
+# Database files
+*.db
+*.sqlite
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# IDE configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Frontend dependencies
+node_modules/
+
+# Frontend build output
+dist/
+build/
+*.local
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.example
+
+# Cost database
+cost.db
