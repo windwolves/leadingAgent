@@ -14,7 +14,10 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	handler := handlers.NewLdAgentHandler(cfg)
+	handler, err := handlers.NewLdAgentHandler(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create handler: %v", err)
+	}
 	processor := handler.Processor()
 
 	transport, err := thrift.NewTServerSocket(":9090")

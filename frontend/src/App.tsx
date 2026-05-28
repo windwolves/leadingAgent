@@ -28,7 +28,7 @@ function App() {
     setIsLoading(true)
 
     try {
-      const response = await fetch('/api/chat', {
+      const response = await fetch('/api/stream-chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -36,19 +36,90 @@ function App() {
         body: JSON.stringify({ message: content.trim() })
       })
 
-      const data = await response.json()
-      
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: data.response || '抱歉，我无法回答这个问题。',
-        promptTokens: data.prompt_tokens,
-        completionTokens: data.completion_tokens,
-        totalTokens: data.total_tokens
+      if (!response.ok) {
+        throw new Error('网络请求失败')
       }
 
-      setMessages(prev => [...prev, assistantMessage])
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('无法读取响应')
+      }
+
+      const decoder = new TextDecoder('utf-8')
+      let accumulatedContent = ''
+      let assistantMessageId = (Date.now() + 1).toString()
+      let promptTokens: number | undefined
+      let completionTokens: number | undefined
+      let totalTokens: number | undefined
+
+      let isLast = false
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+        const lines = chunk.split('\n\n')
+        
+        for (const line of lines) {
+          if (!line.trim()) continue
+          
+          try {
+            const data = JSON.parse(line)
+            
+            if (data.response) {
+              accumulatedContent += data.response
+              
+              if (data.prompt_tokens !== undefined) {
+                promptTokens = data.prompt_tokens
+              }
+              if (data.completion_tokens !== undefined) {
+                completionTokens = data.completion_tokens
+              }
+              if (data.total_tokens !== undefined) {
+                totalTokens = data.total_tokens
+              }
+
+              setMessages(prev => {
+                const existingIndex = prev.findIndex(m => m.id === assistantMessageId)
+                if (existingIndex >= 0) {
+                  const newMessages = [...prev]
+                  newMessages[existingIndex] = {
+                    id: assistantMessageId,
+                    role: 'assistant',
+                    content: accumulatedContent,
+                    promptTokens,
+                    completionTokens,
+                    totalTokens
+                  }
+                  return newMessages
+                } else {
+                  return [...prev, {
+                    id: assistantMessageId,
+                    role: 'assistant',
+                    content: accumulatedContent,
+                    promptTokens,
+                    completionTokens,
+                    totalTokens
+                  }]
+                }
+              })
+
+              if (data.is_last) {
+                isLast = true
+              }
+            }
+          } catch (e) {
+            console.warn('解析响应失败:', e)
+          }
+        }
+        
+        if (isLast) {
+          break
+        }
+      }
     } catch (error) {
+      console.error('流式请求失败:', error)
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
