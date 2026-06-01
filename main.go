@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/example/deepseek-go/config"
-	"github.com/example/deepseek-go/models/deepseek"
+	"leadingAgent/config"
+	"leadingAgent/models/deepseek"
 )
 
 func main() {

@@ -5,11 +5,11 @@ import (
 	"fmt"
 
 	"github.com/apache/thrift/lib/go/thrift"
-	"github.com/example/deepseek-go/config"
-	"github.com/example/deepseek-go/models"
-	"github.com/example/deepseek-go/models/deepseek"
-	"github.com/example/deepseek-go/repository"
-	"github.com/example/deepseek-go/services"
+	"leadingAgent/config"
+	"leadingAgent/models"
+	"leadingAgent/models/deepseek"
+	"leadingAgent/repository"
+	"leadingAgent/services"
 )
 
 type LdAgentHandler struct {

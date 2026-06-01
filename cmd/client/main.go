@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/example/deepseek-go/services"
+	"leadingAgent/services"
 	"github.com/apache/thrift/lib/go/thrift"
 )
 

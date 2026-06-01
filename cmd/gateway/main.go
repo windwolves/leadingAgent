@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/example/deepseek-go/config"
-	"github.com/example/deepseek-go/handlers"
-	"github.com/example/deepseek-go/services"
+	"leadingAgent/config"
+	"leadingAgent/handlers"
+	"leadingAgent/services"
 )
 
 type ChatRequest struct {

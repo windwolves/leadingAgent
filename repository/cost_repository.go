@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/example/deepseek-go/models"
+	"leadingAgent/models"
 	_ "modernc.org/sqlite"
 )
 

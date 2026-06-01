@@ -3,8 +3,8 @@ package main
 import (
 	"log"
 
-	"github.com/example/deepseek-go/config"
-	"github.com/example/deepseek-go/handlers"
+	"leadingAgent/config"
+	"leadingAgent/handlers"
 	"github.com/apache/thrift/lib/go/thrift"
 )
 
