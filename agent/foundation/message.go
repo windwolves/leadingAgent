@@ -12,7 +12,7 @@ const (
 type Message struct {
 	Role       Role               `json:"role"`
 	Content    string             `json:"content,omitempty"`
-	ToolCall   *ToolUseContent    `json:"tool_call,omitempty"`
+	ToolCalls  []ToolUseContent   `json:"tool_calls,omitempty"`
 	ToolResult *ToolResultContent `json:"tool_result,omitempty"`
 }
 

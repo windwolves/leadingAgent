@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"leadingAgent/agent/foundation"
 	"leadingAgent/agent/tools"
@@ -20,7 +21,7 @@ type Tool interface {
 }
 
 type Agent struct {
-	tools      []Tool
+	tools       []Tool
 	modelCaller func(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error)
 }
 
@@ -58,28 +59,9 @@ func (a *Agent) Execute(ctx context.Context, model *foundation.Model, userQuery 
 
 		messages = append(messages, *assistantMsg)
 
-		if assistantMsg.ToolCall != nil {
-			result := a.act(ctx, assistantMsg.ToolCall)
-
-			content := result.GetMessage()
-			if result.IsSuccess() {
-				if sr, ok := result.(*tools.SuccessResult); ok {
-					jsonBytes, err := json.Marshal(sr.Result)
-					if err == nil {
-						content = string(jsonBytes)
-					}
-				}
-			}
-
-			toolMsg := foundation.Message{
-				Role: foundation.RoleTool,
-				ToolResult: &foundation.ToolResultContent{
-					Type:      "tool_result",
-					ToolUseID: assistantMsg.ToolCall.ID,
-					Content:   content,
-				},
-			}
-			messages = append(messages, toolMsg)
+		if len(assistantMsg.ToolCalls) > 0 {
+			toolMsgs := a.executeParallel(ctx, assistantMsg.ToolCalls)
+			messages = append(messages, toolMsgs...)
 		} else {
 			log.Printf("[Agent] Final response: %s", assistantMsg.Content)
 			return nil
@@ -91,7 +73,7 @@ func (a *Agent) think(ctx context.Context, model *foundation.Model, messages []f
 	return a.modelCaller(ctx, model, messages)
 }
 
-func (a *Agent) act(ctx context.Context, toolCall *foundation.ToolUseContent) tools.ToolResult {
+func (a *Agent) act(ctx context.Context, toolCall foundation.ToolUseContent) tools.ToolResult {
 	for _, t := range a.tools {
 		if t.Name() == toolCall.Name {
 			return t.Execute(ctx, toolCall.Input)
@@ -100,6 +82,42 @@ func (a *Agent) act(ctx context.Context, toolCall *foundation.ToolUseContent) to
 	return tools.NewErrorResult(toolCall.Name, "function",
 		fmt.Sprintf("tool %s not found", toolCall.Name),
 		"TOOL_NOT_FOUND", 0, "工具未找到")
+}
+
+func (a *Agent) executeParallel(ctx context.Context, toolCalls []foundation.ToolUseContent) []foundation.Message {
+	results := make([]tools.ToolResult, len(toolCalls))
+	var wg sync.WaitGroup
+
+	for i, tc := range toolCalls {
+		wg.Add(1)
+		go func(idx int, tc foundation.ToolUseContent) {
+			defer wg.Done()
+			results[idx] = a.act(ctx, tc)
+		}(i, tc)
+	}
+	wg.Wait()
+
+	msgs := make([]foundation.Message, 0, len(toolCalls))
+	for i, tc := range toolCalls {
+		content := results[i].GetMessage()
+		if results[i].IsSuccess() {
+			if sr, ok := results[i].(*tools.SuccessResult); ok {
+				if jsonBytes, err := json.Marshal(sr.Result); err == nil {
+					content = string(jsonBytes)
+				}
+			}
+		}
+
+		msgs = append(msgs, foundation.Message{
+			Role: foundation.RoleTool,
+			ToolResult: &foundation.ToolResultContent{
+				Type:      "tool_result",
+				ToolUseID: tc.ID,
+				Content:   content,
+			},
+		})
+	}
+	return msgs
 }
 
 func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
@@ -126,7 +144,7 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 
 	client := deepseek.NewClient(apiKey, apiURL, modelName)
 
-	deepseekMessages := convertToDeepSeekMessages(messages)
+	deepseekMessages := deepseek.ConvertMessages(messages)
 	toolDefs := a.buildToolDefinitions()
 
 	resp, err := client.Chat(deepseekMessages, toolDefs)
@@ -145,17 +163,17 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 	}
 
 	if len(choice.Message.ToolCalls) > 0 {
-		tc := choice.Message.ToolCalls[0]
-		var args map[string]interface{}
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			args = map[string]interface{}{"raw": tc.Function.Arguments}
-		}
-
-		foundationMsg.ToolCall = &foundation.ToolUseContent{
-			Type:  "tool_use",
-			ID:    tc.ID,
-			Name:  tc.Function.Name,
-			Input: args,
+		for _, tc := range choice.Message.ToolCalls {
+			var args map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				args = map[string]interface{}{"raw": tc.Function.Arguments}
+			}
+			foundationMsg.ToolCalls = append(foundationMsg.ToolCalls, foundation.ToolUseContent{
+				Type:  "tool_use",
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Input: args,
+			})
 		}
 	}
 
@@ -165,40 +183,6 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 	}
 
 	return foundationMsg, nil
-}
-
-func convertToDeepSeekMessages(messages []foundation.Message) []deepseek.Message {
-	result := make([]deepseek.Message, 0, len(messages))
-	for _, msg := range messages {
-		dsMsg := deepseek.Message{
-			Role:    string(msg.Role),
-			Content: msg.Content,
-		}
-
-		if msg.ToolCall != nil {
-			argsJSON, _ := json.Marshal(msg.ToolCall.Input)
-			dsMsg.Content = ""
-			dsMsg.ToolCalls = []deepseek.ToolCall{
-				{
-					ID:   msg.ToolCall.ID,
-					Type: "function",
-					Function: deepseek.FunctionCall{
-						Name:      msg.ToolCall.Name,
-						Arguments: string(argsJSON),
-					},
-				},
-			}
-		}
-
-		if msg.ToolResult != nil {
-			dsMsg.Content = msg.ToolResult.Content
-			dsMsg.ToolCallID = msg.ToolResult.ToolUseID
-			dsMsg.Role = "tool"
-		}
-
-		result = append(result, dsMsg)
-	}
-	return result
 }
 
 func (a *Agent) buildToolDefinitions() []deepseek.ToolDef {

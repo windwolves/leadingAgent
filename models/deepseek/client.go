@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 
+	"leadingAgent/agent/foundation"
+
 	"github.com/go-resty/resty/v2"
 )
 
@@ -201,4 +203,38 @@ func (c *Client) StreamChat(messages []Message, handler func(*StreamChatResponse
 	}
 
 	return nil
+}
+
+func ConvertMessages(messages []foundation.Message) []Message {
+	result := make([]Message, 0, len(messages))
+	for _, msg := range messages {
+		dsMsg := Message{
+			Role:    string(msg.Role),
+			Content: msg.Content,
+		}
+
+		if len(msg.ToolCalls) > 0 {
+			dsMsg.Content = ""
+			for _, tc := range msg.ToolCalls {
+				argsJSON, _ := json.Marshal(tc.Input)
+				dsMsg.ToolCalls = append(dsMsg.ToolCalls, ToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: FunctionCall{
+						Name:      tc.Name,
+						Arguments: string(argsJSON),
+					},
+				})
+			}
+		}
+
+		if msg.ToolResult != nil {
+			dsMsg.Content = msg.ToolResult.Content
+			dsMsg.ToolCallID = msg.ToolResult.ToolUseID
+			dsMsg.Role = "tool"
+		}
+
+		result = append(result, dsMsg)
+	}
+	return result
 }

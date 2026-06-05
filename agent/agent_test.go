@@ -31,7 +31,7 @@ func TestAct_ToolFound(t *testing.T) {
 
 	agent := NewAgent(tools.NewReadFileTool())
 
-	result := agent.act(ctx, &foundation.ToolUseContent{
+	result := agent.act(ctx, foundation.ToolUseContent{
 		Name: "read_file",
 		Input: map[string]interface{}{
 			"path": tempFile,
@@ -47,7 +47,7 @@ func TestAct_ToolNotFound(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
 
-	result := agent.act(ctx, &foundation.ToolUseContent{
+	result := agent.act(ctx, foundation.ToolUseContent{
 		Name:  "nonexistent",
 		Input: map[string]interface{}{},
 	})
@@ -69,19 +69,21 @@ func TestExecute_ReActWithReadFile(t *testing.T) {
 			return &foundation.Message{
 				Role:    foundation.RoleAssistant,
 				Content: "Let me read the file.",
-				ToolCall: &foundation.ToolUseContent{
-					Type: "tool_use",
-					ID:   "call_test_001",
-					Name: "read_file",
-					Input: map[string]interface{}{
-						"path": tempFile,
+				ToolCalls: []foundation.ToolUseContent{
+					{
+						Type: "tool_use",
+						ID:   "call_test_001",
+						Name: "read_file",
+						Input: map[string]interface{}{
+							"path": tempFile,
+						},
 					},
 				},
 			}, nil
 		}
 		return &foundation.Message{
 			Role:    foundation.RoleAssistant,
-			Content: "I have read the file. The content is: test content line 1, test content line 2, hello world.",
+			Content: "I have read the file successfully.",
 		}, nil
 	}
 
@@ -108,19 +110,21 @@ func TestExecute_ReActWithBash(t *testing.T) {
 			return &foundation.Message{
 				Role:    foundation.RoleAssistant,
 				Content: "I'll run the echo command.",
-				ToolCall: &foundation.ToolUseContent{
-					Type: "tool_use",
-					ID:   "call_test_002",
-					Name: "bash",
-					Input: map[string]interface{}{
-						"command": "echo hello from agent test",
+				ToolCalls: []foundation.ToolUseContent{
+					{
+						Type: "tool_use",
+						ID:   "call_test_002",
+						Name: "bash",
+						Input: map[string]interface{}{
+							"command": "echo hello from agent test",
+						},
 					},
 				},
 			}, nil
 		}
 		return &foundation.Message{
 			Role:    foundation.RoleAssistant,
-			Content: "The bash command executed successfully. Output: hello from agent test",
+			Content: "The bash command executed successfully.",
 		}, nil
 	}
 
@@ -134,6 +138,76 @@ func TestExecute_ReActWithBash(t *testing.T) {
 
 	if callCount != 2 {
 		t.Fatalf("expected 2 model calls, got %d", callCount)
+	}
+}
+
+func TestExecute_ParallelTools(t *testing.T) {
+	tempFile1 := createTempFile(t, "content of file one")
+	tempFile2 := createTempFile(t, "content of file two")
+
+	agent := NewAgent(tools.NewReadFileTool(), tools.NewBashTool())
+
+	agent.modelCaller = func(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
+		return &foundation.Message{
+			Role:    foundation.RoleAssistant,
+			Content: "Let me read both files and run a command.",
+			ToolCalls: []foundation.ToolUseContent{
+				{
+					Type: "tool_use",
+					ID:   "call_read_1",
+					Name: "read_file",
+					Input: map[string]interface{}{
+						"path": tempFile1,
+					},
+				},
+				{
+					Type: "tool_use",
+					ID:   "call_bash_1",
+					Name: "bash",
+					Input: map[string]interface{}{
+						"command": "echo parallel test",
+					},
+				},
+				{
+					Type: "tool_use",
+					ID:   "call_read_2",
+					Name: "read_file",
+					Input: map[string]interface{}{
+						"path": tempFile2,
+					},
+				},
+			},
+		}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// executeParallel 会并行执行，但 Execute 循环会发现没有更多 tool_calls 所以返回 nil
+	// 这里会 panic 因为 modelCaller 只设置了第一轮，第二轮会调用到真实的 callModel
+	// 所以我们手动调用 executeParallel 来测试并行执行
+	toolCalls := []foundation.ToolUseContent{
+		{Type: "tool_use", ID: "call_read_1", Name: "read_file", Input: map[string]interface{}{"path": tempFile1}},
+		{Type: "tool_use", ID: "call_bash_1", Name: "bash", Input: map[string]interface{}{"command": "echo parallel"}},
+		{Type: "tool_use", ID: "call_read_2", Name: "read_file", Input: map[string]interface{}{"path": tempFile2}},
+	}
+
+	msgs := agent.executeParallel(ctx, toolCalls)
+
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 tool result messages, got %d", len(msgs))
+	}
+
+	for i, msg := range msgs {
+		if msg.Role != foundation.RoleTool {
+			t.Fatalf("message %d: expected RoleTool, got %s", i, msg.Role)
+		}
+		if msg.ToolResult == nil {
+			t.Fatalf("message %d: ToolResult is nil", i)
+		}
+		if msg.ToolResult.ToolUseID != toolCalls[i].ID {
+			t.Fatalf("message %d: expected ToolUseID=%s, got %s", i, toolCalls[i].ID, msg.ToolResult.ToolUseID)
+		}
 	}
 }
 
