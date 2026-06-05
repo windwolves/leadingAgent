@@ -9,6 +9,27 @@ import (
 
 type WriteFileExecutor struct{}
 
+func (e *WriteFileExecutor) InputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"description": map[string]interface{}{
+				"type":        "string",
+				"description": "Reason for writing this file. Always provide description as the first parameter",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "File path (relative or absolute)",
+			},
+			"content": map[string]interface{}{
+				"type":        "string",
+				"description": "File content to write",
+			},
+		},
+		"required": []string{"description", "path", "content"},
+	}
+}
+
 func (e *WriteFileExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
 	start := time.Now()
 

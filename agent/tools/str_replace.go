@@ -10,6 +10,31 @@ import (
 
 type StrReplaceExecutor struct{}
 
+func (e *StrReplaceExecutor) InputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"description": map[string]interface{}{
+				"type":        "string",
+				"description": "Reason for performing this replacement. Always provide description as the first parameter",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "File path (relative or absolute)",
+			},
+			"old_text": map[string]interface{}{
+				"type":        "string",
+				"description": "Old text to be replaced. Ensure this text is unique in the file",
+			},
+			"new_text": map[string]interface{}{
+				"type":        "string",
+				"description": "New replacement text",
+			},
+		},
+		"required": []string{"description", "path", "old_text", "new_text"},
+	}
+}
+
 func (e *StrReplaceExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
 	start := time.Now()
 

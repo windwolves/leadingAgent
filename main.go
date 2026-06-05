@@ -33,7 +33,7 @@ func main() {
 		},
 	}
 
-	resp, err := client.Chat(messages)
+	resp, err := client.Chat(messages, nil)
 	if err != nil {
 		log.Fatalf("Failed to call DeepSeek API: %v", err)
 	}

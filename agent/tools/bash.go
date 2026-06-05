@@ -9,6 +9,19 @@ import (
 
 type BashExecutor struct{}
 
+func (e *BashExecutor) InputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"command": map[string]interface{}{
+				"type":        "string",
+				"description": "The shell command to execute",
+			},
+		},
+		"required": []string{"command"},
+	}
+}
+
 func (e *BashExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
 	start := time.Now()
 

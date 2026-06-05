@@ -11,6 +11,35 @@ const DEFAULT_MAX_CHARS = 12000
 
 type GlobSearchExecutor struct{}
 
+func (e *GlobSearchExecutor) InputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"description": map[string]interface{}{
+				"type":        "string",
+				"description": "Reason for searching files. Always provide description as the first parameter",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Directory path to search in (relative or absolute)",
+			},
+			"pattern": map[string]interface{}{
+				"type":        "string",
+				"description": "Glob pattern, e.g. **/*.go or src/**/*.tsx",
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"description": "Maximum number of matches (default 200)",
+			},
+			"max_chars": map[string]interface{}{
+				"type":        "integer",
+				"description": "Maximum characters returned (default 12000)",
+			},
+		},
+		"required": []string{"description", "path", "pattern"},
+	}
+}
+
 func (e *GlobSearchExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
 	start := time.Now()
 

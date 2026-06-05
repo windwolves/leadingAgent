@@ -5,7 +5,6 @@ go 1.22
 require (
 	github.com/apache/thrift v0.19.0
 	github.com/go-resty/resty/v2 v2.12.0
-	github.com/google/uuid v1.4.0
 	github.com/spf13/viper v1.18.2
 	modernc.org/sqlite v1.24.0
 )
@@ -13,6 +12,7 @@ require (
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/google/uuid v1.4.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

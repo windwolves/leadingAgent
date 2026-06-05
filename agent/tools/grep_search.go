@@ -12,6 +12,43 @@ import (
 
 type GrepSearchExecutor struct{}
 
+func (e *GrepSearchExecutor) InputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"description": map[string]interface{}{
+				"type":        "string",
+				"description": "Reason for searching file contents. Always provide description as the first parameter",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Directory path to search in (relative or absolute)",
+			},
+			"pattern": map[string]interface{}{
+				"type":        "string",
+				"description": "Text or regex pattern to search for",
+			},
+			"glob": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional glob filter, e.g. *.go",
+			},
+			"case_sensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Case sensitive search (default true)",
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"description": "Maximum number of matches (default 200)",
+			},
+			"max_chars": map[string]interface{}{
+				"type":        "integer",
+				"description": "Maximum characters returned (default 12000)",
+			},
+		},
+		"required": []string{"description", "path", "pattern"},
+	}
+}
+
 func (e *GrepSearchExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
 	start := time.Now()
 

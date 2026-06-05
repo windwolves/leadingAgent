@@ -31,13 +31,38 @@ func NewClient(apiKey, apiURL, model string) *Client {
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string      `json:"role"`
+	Content    string      `json:"content,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function FunctionCall `json:"function"`
+}
+
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type ToolDef struct {
+	Type     string           `json:"type"`
+	Function ToolDefFunction  `json:"function"`
+}
+
+type ToolDefFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"`
 }
 
 type ChatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
+	Tools    []ToolDef `json:"tools,omitempty"`
 	Stream   bool      `json:"stream,omitempty"`
 }
 
@@ -47,9 +72,9 @@ type ChatResponse struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index   int     `json:"index"`
-		Message Message `json:"message"`
-		Finish  string  `json:"finish_reason"`
+		Index   int      `json:"index"`
+		Message Message  `json:"message"`
+		Finish  string   `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -75,10 +100,11 @@ type StreamChatResponse struct {
 	} `json:"usage,omitempty"`
 }
 
-func (c *Client) Chat(messages []Message) (*ChatResponse, error) {
+func (c *Client) Chat(messages []Message, tools []ToolDef) (*ChatResponse, error) {
 	req := &ChatRequest{
 		Model:    c.model,
 		Messages: messages,
+		Tools:    tools,
 	}
 
 	var resp ChatResponse

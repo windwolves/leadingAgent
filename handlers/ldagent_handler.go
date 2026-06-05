@@ -4,29 +4,30 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/apache/thrift/lib/go/thrift"
 	"leadingAgent/config"
 	"leadingAgent/models"
 	"leadingAgent/models/deepseek"
 	"leadingAgent/repository"
 	"leadingAgent/services"
+
+	"github.com/apache/thrift/lib/go/thrift"
 )
 
 type LdAgentHandler struct {
-	client       *deepseek.Client
-	costRepo     repository.CostRepository
-	model        string
-	apiURL       string
+	client   *deepseek.Client
+	costRepo repository.CostRepository
+	model    string
+	apiURL   string
 }
 
 func NewLdAgentHandler(cfg *config.Config) (*LdAgentHandler, error) {
 	client := deepseek.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekAPIURL, cfg.DeepSeekModel)
-	
+
 	costRepo, err := repository.NewCostRepository("cost.db")
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return &LdAgentHandler{
 		client:   client,
 		costRepo: costRepo,
@@ -47,7 +48,7 @@ func (h *LdAgentHandler) Chat(ctx context.Context, request *services.ChatRequest
 		},
 	}
 
-	resp, err := h.client.Chat(messages)
+	resp, err := h.client.Chat(messages, nil)
 	if err != nil {
 		return &services.ChatResponse{
 			Response: "",

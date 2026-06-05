@@ -11,6 +11,31 @@ import (
 
 type ReadFileExecutor struct{}
 
+func (e *ReadFileExecutor) InputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "File path (relative or absolute)",
+			},
+			"start_line": map[string]interface{}{
+				"type":        "integer",
+				"description": "Start line number (1-based, default 0 reads from beginning)",
+			},
+			"end_line": map[string]interface{}{
+				"type":        "integer",
+				"description": "End line number (default 0 reads to end of file)",
+			},
+			"max_chars": map[string]interface{}{
+				"type":        "integer",
+				"description": "Maximum characters returned (default 12000)",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
 func (e *ReadFileExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
 	start := time.Now()
 
