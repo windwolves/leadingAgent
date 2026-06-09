@@ -104,18 +104,11 @@ func (a *Agent) Close() error {
 	return nil
 }
 
-func (a *Agent) Execute(ctx context.Context, model *foundation.Model, userQuery string) (string, error) {
-	a.logger.Printf("[Agent] Execute: query=%q model=%s", userQuery, model.Name)
-	messages := []foundation.Message{
-		{
-			Role:    foundation.RoleSystem,
-			Content: "You are a helpful assistant. When you need information, use the available tools to search or take action.",
-		},
-		{
-			Role:    foundation.RoleUser,
-			Content: userQuery,
-		},
-	}
+const defaultSystemPrompt = "You are a helpful assistant. When you need information, use the available tools to search or take action."
+
+func (a *Agent) Execute(ctx context.Context, model *foundation.Model, systemPrompt string, history []foundation.Message, userQuery string) (string, error) {
+	a.logger.Printf("[Agent] Execute: query=%q model=%s history=%d", userQuery, model.Name, len(history))
+	messages := a.buildMessages(systemPrompt, history, userQuery)
 
 	for {
 		select {
@@ -143,18 +136,9 @@ func (a *Agent) Execute(ctx context.Context, model *foundation.Model, userQuery 
 }
 
 // ExecuteStreaming runs the ReAct loop with streaming callbacks for each event.
-func (a *Agent) ExecuteStreaming(ctx context.Context, model *foundation.Model, userQuery string, onEvent StreamCallback) error {
-	a.logger.Printf("[Agent] ExecuteStreaming: query=%q model=%s", userQuery, model.Name)
-	messages := []foundation.Message{
-		{
-			Role:    foundation.RoleSystem,
-			Content: "You are a helpful assistant. When you need information, use the available tools to search or take action.",
-		},
-		{
-			Role:    foundation.RoleUser,
-			Content: userQuery,
-		},
-	}
+func (a *Agent) ExecuteStreaming(ctx context.Context, model *foundation.Model, systemPrompt string, history []foundation.Message, userQuery string, onEvent StreamCallback) error {
+	a.logger.Printf("[Agent] ExecuteStreaming: query=%q model=%s history=%d", userQuery, model.Name, len(history))
+	messages := a.buildMessages(systemPrompt, history, userQuery)
 
 	turn := 0
 	for {
@@ -199,6 +183,20 @@ func (a *Agent) ExecuteStreaming(ctx context.Context, model *foundation.Model, u
 			return nil
 		}
 	}
+}
+
+// buildMessages 拼接 system prompt + 历史消息 + 当前用户消息，作为本轮推理的输入。
+func (a *Agent) buildMessages(systemPrompt string, history []foundation.Message, userQuery string) []foundation.Message {
+	if systemPrompt == "" {
+		systemPrompt = defaultSystemPrompt
+	}
+	out := make([]foundation.Message, 0, len(history)+2)
+	out = append(out, foundation.Message{Role: foundation.RoleSystem, Content: systemPrompt})
+	out = append(out, history...)
+	if userQuery != "" {
+		out = append(out, foundation.Message{Role: foundation.RoleUser, Content: userQuery})
+	}
+	return out
 }
 
 func (a *Agent) think(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
