@@ -52,3 +52,4 @@ cost.db
 # Test files
 cmd/test/
 test_output/
+gateway

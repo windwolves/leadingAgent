@@ -40,6 +40,7 @@ type Message struct {
 }
 
 type ToolCall struct {
+	Index    int          `json:"index"`
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`
@@ -122,10 +123,11 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (*ChatResponse, error
 	return &resp, nil
 }
 
-func (c *Client) StreamChat(messages []Message, handler func(*StreamChatResponse) error) error {
+func (c *Client) StreamChat(messages []Message, tools []ToolDef, handler func(*StreamChatResponse) error) error {
 	req := &ChatRequest{
 		Model:    c.model,
 		Messages: messages,
+		Tools:    tools,
 		Stream:   true,
 	}
 

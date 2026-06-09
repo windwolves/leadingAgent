@@ -108,7 +108,7 @@ func (h *LdAgentHandler) StreamChat(ctx context.Context, request *services.ChatR
 
 	var promptTokens, completionTokens, totalTokens int
 
-	err := h.client.StreamChat(messages, func(streamResp *deepseek.StreamChatResponse) error {
+	err := h.client.StreamChat(messages, nil, func(streamResp *deepseek.StreamChatResponse) error {
 		isLast := false
 		content := ""
 

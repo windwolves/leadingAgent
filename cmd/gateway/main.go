@@ -3,44 +3,57 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
+	"leadingAgent/agent"
+	"leadingAgent/agent/foundation"
 	"leadingAgent/config"
-	"leadingAgent/handlers"
-	"leadingAgent/services"
 )
 
 type ChatRequest struct {
-	Message string `json:"message"`
-}
-
-type ChatResponse struct {
-	Response         string `json:"response"`
-	PromptTokens     int    `json:"prompt_tokens"`
-	CompletionTokens int    `json:"completion_tokens"`
-	TotalTokens      int    `json:"total_tokens"`
-}
-
-type StreamChatResponse struct {
-	Response         string `json:"response"`
-	IsLast           bool   `json:"is_last"`
-	PromptTokens     int    `json:"prompt_tokens"`
-	CompletionTokens int    `json:"completion_tokens"`
-	TotalTokens      int    `json:"total_tokens"`
+	Message   string `json:"message"`
+	SessionId string `json:"sessionId"`
 }
 
 func main() {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+	apiKey := os.Getenv("DEEPSEEK_API_KEY")
+	apiURL := os.Getenv("DEEPSEEK_API_URL")
+	modelName := os.Getenv("DEEPSEEK_MODEL")
+
+	if cfg, err := config.LoadConfig(); err == nil {
+		if cfg.DeepSeekAPIKey != "" {
+			apiKey = cfg.DeepSeekAPIKey
+		}
+		if cfg.DeepSeekAPIURL != "" {
+			apiURL = cfg.DeepSeekAPIURL
+		}
+		if cfg.DeepSeekModel != "" {
+			modelName = cfg.DeepSeekModel
+		}
 	}
 
-	handler, err := handlers.NewLdAgentHandler(cfg)
-	if err != nil {
-		log.Fatalf("Failed to create handler: %v", err)
+	if apiURL == "" {
+		apiURL = "https://api.deepseek.com/v1"
 	}
+	if modelName == "" {
+		modelName = "deepseek-chat"
+	}
+
+	log.Printf("Using model: %s, API URL: %s", modelName, apiURL)
+
+	model := &foundation.Model{
+		Name: modelName,
+		Options: map[string]interface{}{
+			"api_key": apiKey,
+		},
+	}
+
+	a := agent.NewAgent()
+	defer a.Close()
 
 	http.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -54,44 +67,7 @@ func main() {
 			return
 		}
 
-		requestID := time.Now().UnixNano()
-		ctx := context.WithValue(r.Context(), "request_id", requestID)
-
-		serviceReq := &services.ChatRequest{
-			Message: req.Message,
-		}
-
-		resp, err := handler.Chat(ctx, serviceReq)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(ChatResponse{
-			Response:         resp.Response,
-			PromptTokens:     resp.PromptTokens,
-			CompletionTokens: resp.CompletionTokens,
-			TotalTokens:      resp.TotalTokens,
-		})
-	})
-
-	http.HandleFunc("/api/stream-chat", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req ChatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Transfer-Encoding", "chunked")
-		w.Header().Set("Connection", "keep-alive")
+		log.Printf("[Gateway] /api/chat (streaming): message=%q sessionId=%q", req.Message, req.SessionId)
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -99,45 +75,40 @@ func main() {
 			return
 		}
 
-		requestID := time.Now().UnixNano()
-		ctx := context.WithValue(r.Context(), "request_id", requestID)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		serviceReq := &services.ChatRequest{
-			Message: req.Message,
-		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
 
-		sender := func(resp *services.StreamChatResponse) error {
-			response := StreamChatResponse{
-				Response:         resp.Response,
-				IsLast:           resp.IsLast,
-				PromptTokens:     resp.PromptTokens,
-				CompletionTokens: resp.CompletionTokens,
-				TotalTokens:      resp.TotalTokens,
-			}
-
-			data, err := json.Marshal(response)
-			if err != nil {
-				return err
-			}
-
-			if _, err := w.Write(data); err != nil {
-				return err
-			}
-			if _, err := w.Write([]byte("\n\n")); err != nil {
-				return err
-			}
+		sendEvent := func(evt agent.StreamEvent) error {
+			data, _ := json.Marshal(evt)
+			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
-
 			return nil
 		}
 
-		if err := handler.StreamChat(ctx, serviceReq, sender); err != nil {
-			log.Printf("Stream chat error: %v", err)
+		err := a.ExecuteStreaming(ctx, model, req.Message, sendEvent)
+		if err != nil {
+			log.Printf("[Gateway] streaming error: %v", err)
+			errData, _ := json.Marshal(agent.StreamEvent{
+				Type:    agent.StreamEventError,
+				Content: err.Error(),
+			})
+			fmt.Fprintf(w, "data: %s\n\n", errData)
+			flusher.Flush()
 		}
 	})
 
-	log.Println("Starting HTTP gateway on port 8080...")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Starting HTTP gateway (SSE streaming) on port %s...", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Gateway failed to start: %v", err)
 	}
 }

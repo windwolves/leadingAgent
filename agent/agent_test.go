@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"leadingAgent/agent/foundation"
-	"leadingAgent/agent/tools"
 )
 
 func createTempFile(t *testing.T, content string) string {
@@ -29,7 +28,7 @@ func TestAct_ToolFound(t *testing.T) {
 	ctx := context.Background()
 	tempFile := createTempFile(t, "hello world from test")
 
-	agent := NewAgent(tools.NewReadFileTool())
+	agent := NewAgent()
 
 	result := agent.act(ctx, foundation.ToolUseContent{
 		Name: "read_file",
@@ -60,7 +59,7 @@ func TestAct_ToolNotFound(t *testing.T) {
 func TestExecute_ReActWithReadFile(t *testing.T) {
 	tempFile := createTempFile(t, "test content line 1\ntest content line 2\nhello world")
 
-	agent := NewAgent(tools.NewReadFileTool())
+	agent := NewAgent()
 
 	callCount := 0
 	agent.modelCaller = func(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
@@ -90,9 +89,12 @@ func TestExecute_ReActWithReadFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "read my test file")
+	resp, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "read my test file")
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
+	}
+	if resp != "I have read the file successfully." {
+		t.Fatalf("expected final response, got: %q", resp)
 	}
 
 	if callCount != 2 {
@@ -101,7 +103,7 @@ func TestExecute_ReActWithReadFile(t *testing.T) {
 }
 
 func TestExecute_ReActWithBash(t *testing.T) {
-	agent := NewAgent(tools.NewBashTool())
+	agent := NewAgent()
 
 	callCount := 0
 	agent.modelCaller = func(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
@@ -131,9 +133,12 @@ func TestExecute_ReActWithBash(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "run echo command")
+	resp, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "run echo command")
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
+	}
+	if resp != "The bash command executed successfully." {
+		t.Fatalf("expected final response, got: %q", resp)
 	}
 
 	if callCount != 2 {
@@ -145,7 +150,7 @@ func TestExecute_ParallelTools(t *testing.T) {
 	tempFile1 := createTempFile(t, "content of file one")
 	tempFile2 := createTempFile(t, "content of file two")
 
-	agent := NewAgent(tools.NewReadFileTool(), tools.NewBashTool())
+	agent := NewAgent()
 
 	agent.modelCaller = func(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
 		return &foundation.Message{
@@ -183,9 +188,6 @@ func TestExecute_ParallelTools(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// executeParallel 会并行执行，但 Execute 循环会发现没有更多 tool_calls 所以返回 nil
-	// 这里会 panic 因为 modelCaller 只设置了第一轮，第二轮会调用到真实的 callModel
-	// 所以我们手动调用 executeParallel 来测试并行执行
 	toolCalls := []foundation.ToolUseContent{
 		{Type: "tool_use", ID: "call_read_1", Name: "read_file", Input: map[string]interface{}{"path": tempFile1}},
 		{Type: "tool_use", ID: "call_bash_1", Name: "bash", Input: map[string]interface{}{"command": "echo parallel"}},
@@ -212,12 +214,12 @@ func TestExecute_ParallelTools(t *testing.T) {
 }
 
 func TestExecute_ContextCancellation(t *testing.T) {
-	agent := NewAgent(tools.NewBashTool())
+	agent := NewAgent()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "test query")
+	_, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "test query")
 
 	if err == nil {
 		t.Fatal("expected context canceled error")
