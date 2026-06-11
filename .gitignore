@@ -52,6 +52,6 @@ cost.db
 # Test files
 cmd/test/
 test_output/
-gateway
 data/sessions.db-shm
 data/sessions.db-wal
+gateway

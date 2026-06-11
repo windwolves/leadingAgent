@@ -2,150 +2,202 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
+	"time"
 
 	"leadingAgent/agent"
-	"leadingAgent/agent/foundation"
-	"leadingAgent/session"
+	"leadingAgent/services"
 )
 
+// ChatRequest 前端发送的对话请求。
 type ChatRequest struct {
 	Message   string `json:"message"`
 	SessionId string `json:"sessionId,omitempty"`
 	UserId    string `json:"userId,omitempty"`
 }
 
-type ChatResponse struct {
-	Response         string `json:"response"`
-	SessionId        string `json:"sessionId,omitempty"`
-	Success          bool   `json:"success"`
-	Error            string `json:"error,omitempty"`
-	PromptTokens     int32  `json:"promptTokens,omitempty"`
-	CompletionTokens int32  `json:"completionTokens,omitempty"`
-	TotalTokens      int32  `json:"totalTokens,omitempty"`
-}
-
-type StreamChatResponse struct {
-	Response         string `json:"response"`
-	SessionId        string `json:"sessionId,omitempty"`
-	IsLast           bool   `json:"isLast"`
-	Success          bool   `json:"success"`
-	Error            string `json:"error,omitempty"`
-	PromptTokens     int32  `json:"promptTokens,omitempty"`
-	CompletionTokens int32  `json:"completionTokens,omitempty"`
-	TotalTokens      int32  `json:"totalTokens,omitempty"`
-}
-
-// AgentHandler 对外暴露的对话接口，现在依赖 session.Manager 保留上下文。
+// AgentHandler HTTP 层处理器，负责请求参数校验、SSE 流式响应编排和错误返回。
+// 对话业务委托给 services.AgentService，会话管理委托给 services.SessionService。
 type AgentHandler struct {
-	agent    *agent.Agent
-	model    *foundation.Model
-	sessions *session.Manager
-	logger   *log.Logger
+	svc     *services.AgentService
+	sessSvc *services.SessionService
+	logger  *log.Logger
 }
 
-func NewAgentHandler(a *agent.Agent, m *foundation.Model, sm *session.Manager) *AgentHandler {
-	if sm == nil {
-		// 退化到无 session 模式，保证初始化安全
-		sm = session.NewManager(session.NewInMemoryRepository())
-	}
+// NewAgentHandler 创建 HTTP 层处理器。
+func NewAgentHandler(svc *services.AgentService, sessSvc *services.SessionService) *AgentHandler {
 	return &AgentHandler{
-		agent:    a,
-		model:    m,
-		sessions: sm,
-		logger:   log.Default(),
+		svc:     svc,
+		sessSvc: sessSvc,
+		logger:  log.Default(),
 	}
 }
 
-// Chat 单轮问答，使用 session 保存对话历史。
-func (h *AgentHandler) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	if req == nil || req.Message == "" {
-		return &ChatResponse{Success: false, Error: "empty message"}, nil
+// HandleChat 处理 POST /api/chat，流式 SSE 响应。
+func (h *AgentHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	sess, err := h.sessions.GetOrCreate(ctx, req.SessionId, req.UserId)
-	if err != nil {
-		h.logger.Printf("[AgentHandler] session error: %v", err)
-		return &ChatResponse{Success: false, Error: "session unavailable"}, nil
+	var req ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Message == "" {
+		http.Error(w, "empty message", http.StatusBadRequest)
+		return
 	}
 
-	// 把历史消息拼到 agent 输入。
-	userMsg := foundation.Message{Role: foundation.RoleUser, Content: req.Message}
-	updated, err := h.sessions.Append(ctx, sess.ID, req.UserId, userMsg)
-	if err != nil {
-		h.logger.Printf("[AgentHandler] append user msg: %v", err)
-		return &ChatResponse{SessionId: sess.ID, Success: false, Error: err.Error()}, nil
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		h.handleChatFallback(w, r, req)
+		return
 	}
 
-	// 当前用户消息已经 Append 进 session，取 Messages[:len-1] 作为"不含本轮 user"的历史；
-	// 并把当前 userMsg 以独立参数形式传入，避免重复。
-	var history []foundation.Message
-	if n := len(updated.Messages); n > 1 {
-		history = updated.Messages[:n-1]
-	}
-	response, runErr := h.agent.Execute(ctx, h.model, updated.SystemPrompt, history, req.Message)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	if runErr != nil {
-		_ = h.sessions.RecordError(ctx, updated.ID, req.UserId, 3)
-		return &ChatResponse{SessionId: updated.ID, Success: false, Error: runErr.Error()}, nil
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	h.logger.Printf("[AgentHandler] /api/chat message=%q sessionId=%q userId=%q",
+		truncate(req.Message, 80), req.SessionId, req.UserId)
+
+	emit := func(evt agent.StreamEvent) error {
+		data, _ := json.Marshal(evt)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
 	}
 
-	assistantMsg := foundation.Message{Role: foundation.RoleAssistant, Content: response}
-	if _, err := h.sessions.Append(ctx, updated.ID, req.UserId, assistantMsg); err != nil {
-		h.logger.Printf("[AgentHandler] append assistant msg: %v", err)
+	if err := h.svc.StreamChat(ctx, req.SessionId, req.UserId, req.Message, emit); err != nil {
+		h.logger.Printf("[AgentHandler] streaming error: %v", err)
+		_ = emit(agent.StreamEvent{
+			Type:    agent.StreamEventError,
+			Content: err.Error(),
+		})
 	}
-
-	return &ChatResponse{
-		Response:  response,
-		SessionId: updated.ID,
-		Success:   true,
-	}, nil
 }
 
-// StreamChat 流式对话；同样走 session 保留上下文。
-func (h *AgentHandler) StreamChat(ctx context.Context, req *ChatRequest, onEvent agent.StreamCallback) error {
-	if req == nil || req.Message == "" {
-		if onEvent != nil {
-			_ = onEvent(agent.StreamEvent{Type: agent.StreamEventDone, Content: "empty message"})
-		}
-		return nil
+// HandleSessions 处理 /api/sessions（GET 列表 / DELETE 删除）。
+func (h *AgentHandler) HandleSessions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListSessions(w, r)
+	case http.MethodDelete:
+		h.handleDeleteSession(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *AgentHandler) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("userId")
+	if userID == "" {
+		http.Error(w, "missing userId", http.StatusBadRequest)
+		return
 	}
 
-	sess, err := h.sessions.GetOrCreate(ctx, req.SessionId, req.UserId)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	list, err := h.sessSvc.ListSessions(ctx, userID, 100)
 	if err != nil {
-		return err
+		h.logger.Printf("[AgentHandler] list sessions error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	userMsg := foundation.Message{Role: foundation.RoleUser, Content: req.Message}
-	updated, err := h.sessions.Append(ctx, sess.ID, req.UserId, userMsg)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(list)
+}
+
+func (h *AgentHandler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SessionId string `json:"sessionId"`
+		UserId    string `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.SessionId == "" {
+		http.Error(w, "missing sessionId", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := h.sessSvc.DeleteSession(ctx, body.SessionId, body.UserId); err != nil {
+		h.logger.Printf("[AgentHandler] delete session error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleGetSessionMessages 处理 GET /api/sessions/messages。
+func (h *AgentHandler) HandleGetSessionMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sessionID := r.URL.Query().Get("sessionId")
+	userID := r.URL.Query().Get("userId")
+	if sessionID == "" {
+		http.Error(w, "missing sessionId", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	msgs, err := h.sessSvc.GetMessages(ctx, sessionID, userID)
 	if err != nil {
-		return err
+		h.logger.Printf("[AgentHandler] get session messages error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	var assistantContent string
-	wrap := func(event agent.StreamEvent) error {
-		if event.Type == agent.StreamEventTextDelta {
-			assistantContent += event.Content
-		}
-		if onEvent != nil {
-			return onEvent(event)
-		}
-		return nil
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(msgs)
+}
+
+func truncate(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// handleChatFallback 非流式降级处理，返回普通 JSON。
+func (h *AgentHandler) handleChatFallback(w http.ResponseWriter, r *http.Request, req ChatRequest) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	result, err := h.svc.Chat(ctx, req.SessionId, req.UserId, req.Message)
+	if err != nil {
+		h.logger.Printf("[AgentHandler] chat fallback error: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
 	}
 
-	// 同上：当前 userMsg 已进入 session.Messages 最后一条，喂历史时排除。
-	var history []foundation.Message
-	if n := len(updated.Messages); n > 1 {
-		history = updated.Messages[:n-1]
-	}
-
-	if err := h.agent.ExecuteStreaming(ctx, h.model, updated.SystemPrompt, history, req.Message, wrap); err != nil {
-		_ = h.sessions.RecordError(ctx, updated.ID, req.UserId, 3)
-		return err
-	}
-
-	if assistantContent != "" {
-		assistantMsg := foundation.Message{Role: foundation.RoleAssistant, Content: assistantContent}
-		_, _ = h.sessions.Append(ctx, updated.ID, req.UserId, assistantMsg)
-	}
-	return nil
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"response":  result.Response,
+		"sessionId": result.SessionID,
+	})
 }

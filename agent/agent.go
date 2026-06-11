@@ -29,12 +29,13 @@ const (
 
 // StreamEvent represents a single streaming event.
 type StreamEvent struct {
-	Type    string                 `json:"type"`
-	Content string                 `json:"content,omitempty"`
-	Tool    string                 `json:"tool,omitempty"`
-	Input   map[string]interface{} `json:"input,omitempty"`
-	Result  string                 `json:"result,omitempty"`
-	Turns   int                    `json:"turns,omitempty"`
+	Type      string                 `json:"type"`
+	Content   string                 `json:"content,omitempty"`
+	Tool      string                 `json:"tool,omitempty"`
+	Input     map[string]interface{} `json:"input,omitempty"`
+	Result    string                 `json:"result,omitempty"`
+	Turns     int                    `json:"turns,omitempty"`
+	SessionID string                 `json:"sessionId,omitempty"`
 }
 
 // StreamCallback is called for each streaming event.

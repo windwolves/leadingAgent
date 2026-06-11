@@ -265,4 +265,9 @@ go test  ./session/... -count=1
 4. **会话摘要**：在消息数达到阈值时，让模型生成一次「上下文摘要」，替换早期消息。
 5. **指标 & 审计**：让 `ToolCallMeta / TokenUsage` 与已有 `repository.CostRepository` 打通。
 6. **WAL + 回放启动**：为多实例部署下的写可靠性兜底。
+7. **工作记忆窗口管理**：当 `len(Messages)` 逼近模型 context window 时，对早期轮次做自动摘要压缩（summarize early turns），替换原始消息以控制 token 消耗，避免简单截断导致上下文丢失。
+8. **长期语义记忆（Semantic Memory）**：Agent 增加 `remember` 工具，将用户偏好、身份信息、常用配置等关键事实写入 `Session.MetaData` 或独立的 `user_facts` 表；每次 `GetOrCreate` 时自动检索并注入 system prompt，实现跨 session 的个性化记忆。
+9. **情节记忆（Episodic Memory）**：引入 embedding 模型 + 向量数据库（如 Milvus / Pinecone / pgvector），对每段对话生成摘要 → 向量化 → 存入向量库。后续对话按语义相似度召回相关历史片段，作为额外上下文注入 LLM。
+10. **过程记忆（Procedural Memory / Skill）**：对高频业务流程（如"处理退款"、"生成周报"）抽象为可复用的工作流定义，支持 Agent 按意图匹配后加载对应 procedure，实现从"每次推理"到"模式复用"的跃升。
+11. **记忆优先级缓存**：高频访问的热点 session / user_facts 加一层 `sync.Map` 内存缓存，减少 SQLite 查询；缓存 TTL 与 session TTL 对齐，写穿透（write-through）保证一致性。
 
