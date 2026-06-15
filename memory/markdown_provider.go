@@ -144,7 +144,7 @@ func (p *MarkdownProvider) filePath(userID, category, id, title string) string {
 	return filepath.Join("user-"+userID, category, filename)
 }
 
-// flushIndex 将当前内存索引同步写入 index.json，确保重启后状态一致。
+// flushIndex 异步写 index.json。
 func (p *MarkdownProvider) flushIndex() error {
 	indexPath := filepath.Join(p.root, "index.json")
 	return p.index.SaveToFile(indexPath)
@@ -154,12 +154,7 @@ func (p *MarkdownProvider) flushIndex() error {
 
 func (p *MarkdownProvider) Create(_ context.Context, item *MemoryItem) error {
 	p.mu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			p.mu.Unlock()
-		}
-	}()
+	defer p.mu.Unlock()
 
 	if item == nil || item.UserID == "" {
 		return ErrInvalid
@@ -223,14 +218,7 @@ func (p *MarkdownProvider) Create(_ context.Context, item *MemoryItem) error {
 		UpdatedAt: item.UpdatedAt,
 	})
 
-	// 释放写锁后再 flush index.json，避免 I/O 阻塞并发写入
-	locked = false
-	p.mu.Unlock()
-
-	if err := p.flushIndex(); err != nil {
-		log.Printf("[MarkdownProvider] Create: flush index error: %v", err)
-		return err
-	}
+	go func() { _ = p.flushIndex() }()
 	return nil
 }
 
@@ -254,12 +242,7 @@ func (p *MarkdownProvider) Get(_ context.Context, id, userID string) (*MemoryIte
 
 func (p *MarkdownProvider) Update(_ context.Context, item *MemoryItem) error {
 	p.mu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			p.mu.Unlock()
-		}
-	}()
+	defer p.mu.Unlock()
 
 	if item == nil || item.ID == "" {
 		return ErrInvalid
@@ -300,25 +283,13 @@ func (p *MarkdownProvider) Update(_ context.Context, item *MemoryItem) error {
 	entry2.Title = extractTitleFromMemory(item.Memory)
 	p.index.Upsert(&entry2)
 
-	// 释放写锁后再 flush index.json，避免 I/O 阻塞并发写入
-	locked = false
-	p.mu.Unlock()
-
-	if err := p.flushIndex(); err != nil {
-		log.Printf("[MarkdownProvider] Update: flush index error: %v", err)
-		return err
-	}
+	go func() { _ = p.flushIndex() }()
 	return nil
 }
 
 func (p *MarkdownProvider) Delete(_ context.Context, id, userID string) error {
 	p.mu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			p.mu.Unlock()
-		}
-	}()
+	defer p.mu.Unlock()
 
 	entry := p.index.GetByID(id, userID)
 	if entry == nil {
@@ -331,15 +302,7 @@ func (p *MarkdownProvider) Delete(_ context.Context, id, userID string) error {
 	}
 
 	p.index.Remove(id, userID)
-
-	// 释放写锁后再 flush index.json，避免 I/O 阻塞并发写入
-	locked = false
-	p.mu.Unlock()
-
-	if err := p.flushIndex(); err != nil {
-		log.Printf("[MarkdownProvider] Delete: flush index error: %v", err)
-		return err
-	}
+	go func() { _ = p.flushIndex() }()
 	return nil
 }
 

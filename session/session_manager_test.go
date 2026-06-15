@@ -49,18 +49,67 @@ func TestCreateAndAppend(t *testing.T) {
 }
 
 func TestExpiry(t *testing.T) {
-	m := NewManager(NewInMemoryRepository(), WithTTL(100*time.Millisecond))
-	defer m.Close()
+	// 场景 1：过期但在续期窗口内 → 应被续期（相同 ID）
+	m1 := NewManager(NewInMemoryRepository(), WithTTL(100*time.Millisecond))
+	defer m1.Close()
 	ctx := context.Background()
 
-	s, err := m.Create(ctx, "", "u1")
+	s1, err := m1.Create(ctx, "", "u1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	time.Sleep(150 * time.Millisecond)
-	if _, err := m.Get(ctx, s.ID, "u1"); err != ErrExpired {
+
+	// 读操作：过期会话仍然可读
+	if _, err := m1.Get(ctx, s1.ID, "u1"); err != nil {
+		t.Fatalf("expected Get to succeed for expired session, got %v", err)
+	}
+
+	// 写操作：过期会话不可再追加消息
+	if _, err := m1.Append(ctx, s1.ID, "u1", foundation.Message{Role: foundation.RoleUser, Content: "x"}); err != ErrExpired {
 		t.Fatalf("expected ErrExpired, got %v", err)
+	}
+
+	// GetOrCreate：过期但在默认 7 天续期窗口内 → 应被续期（相同 ID）
+	renewed, err := m1.GetOrCreate(ctx, s1.ID, "u1")
+	if err != nil {
+		t.Fatalf("GetOrCreate (renew) failed: %v", err)
+	}
+	if renewed.ID != s1.ID {
+		t.Fatalf("expected renewed session to keep ID, got %s (old=%s)", renewed.ID, s1.ID)
+	}
+	if renewed.ExpiresAt.Before(s1.ExpiresAt) {
+		t.Fatal("expected renewed ExpiresAt to be later")
+	}
+
+	// 场景 2：超出续期窗口 → 应创建新会话（不同 ID）
+	m2 := NewManager(NewInMemoryRepository(),
+		WithTTL(100*time.Millisecond),
+		WithRenewWindow(10*time.Millisecond), // 很短的续期窗口
+	)
+	defer m2.Close()
+
+	s2, err := m2.Create(ctx, "", "u2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 先追加一条消息，使会话被视为"有内容"
+	if _, err := m2.Append(ctx, s2.ID, "u2", foundation.Message{Role: foundation.RoleUser, Content: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(150 * time.Millisecond) // 远超 TTL(100ms) + renewWindow(10ms)
+
+	newSess, err := m2.GetOrCreate(ctx, s2.ID, "u2")
+	if err != nil {
+		t.Fatalf("GetOrCreate (beyond window) failed: %v", err)
+	}
+	if newSess.ID == s2.ID {
+		t.Fatal("expected a new session ID when beyond renew window, got the old one")
+	}
+	if replacedFrom, ok := newSess.MetaData["replaced_from"]; !ok || replacedFrom != s2.ID {
+		t.Fatalf("expected MetaData.replaced_from=%s, got %v", s2.ID, replacedFrom)
 	}
 }
 

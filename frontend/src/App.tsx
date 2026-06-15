@@ -112,21 +112,27 @@ function App() {
     setMessages([])
   }
 
-  async function handleDeleteSession(sessionId: string) {
-    try {
-      await fetch('/api/sessions', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, userId }),
-      })
-    } catch {
-      // ignore network errors
-    }
-    // 请求完成后（无论成败）再更新 UI，避免 fetch 期间 React 重渲染导致 abort
+  async function handleDeleteSession(sessionId: string, event: React.MouseEvent) {
+    event.stopPropagation()
+    event.preventDefault()
+    // 乐观删除：先更新 UI，再发请求
     setSessions((prev) => prev.filter((s) => s.id !== sessionId))
     if (activeSessionId === sessionId) {
       setActiveSessionId('')
       setMessages([])
+    }
+    try {
+      const ctl = new AbortController()
+      const t = setTimeout(() => ctl.abort(), 5000)
+      await fetch('/api/sessions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, userId }),
+        signal: ctl.signal,
+      })
+      clearTimeout(t)
+    } catch {
+      // ignore network errors; UI already reflects deletion
     }
   }
 
@@ -263,9 +269,11 @@ function App() {
         setMessages((prev) => prev.filter((m) => m.id !== assistantId))
       }
 
-      // 新会话：把 activeSessionId 设为后端返回的 id，并刷新列表。
-      if (!activeSessionId && receivedSessionId) {
+      // 后端返回的 sessionId 与当前不一致时（旧 session 过期/不存在，后端创建了新 session），
+      // 统一用后端返回的 id 作为 activeSessionId，并重新加载该会话的完整历史。
+      if (receivedSessionId && receivedSessionId !== activeSessionId) {
         setActiveSessionId(receivedSessionId)
+        await loadMessages(receivedSessionId)
       }
 
       // 请求正常完成后立即清除 abortRef，避免下一次调用时误 abort 已完成的请求
@@ -308,30 +316,33 @@ function App() {
           ) : (
             <ul className="space-y-1 px-2 pb-4">
               {sessions.map((s) => (
-              <li key={s.id} className="group flex items-stretch gap-0.5">
+              <li key={s.id}>
                 <button
                   type="button"
                   onClick={() => handleSelectSession(s.id)}
                   className={
-                    'flex-1 text-left px-3 py-2 rounded-md transition-colors ' +
+                    'group w-full text-left px-3 py-2 rounded-md transition-colors ' +
                     (activeSessionId === s.id
                       ? 'bg-white/10 text-white'
                       : 'hover:bg-white/5 text-slate-200')
                   }
                 >
-                  <div className="text-sm font-medium truncate">
-                    {s.preview ? s.preview : '(空会话)'}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-medium truncate">
+                      {s.preview ? s.preview : '(空会话)'}
+                    </div>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => handleDeleteSession(s.id, e)}
+                      className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-400 text-xs cursor-pointer"
+                    >
+                      删除
+                    </span>
                   </div>
                   <div className="text-xs text-slate-500 mt-1">
                     {new Date(s.updated_at).toLocaleString()}
                   </div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDeleteSession(s.id)}
-                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-400 text-xs px-2 rounded-md transition-opacity shrink-0"
-                >
-                  删除
                 </button>
               </li>
             ))}

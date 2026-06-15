@@ -137,6 +137,80 @@ func (a *Agent) Execute(ctx context.Context, model *foundation.Model, systemProm
 	}
 }
 
+// Summarize 生成对话内容的简洁摘要。不触发工具调用，只做纯文本模型推理。
+// 用于：过期 session 的上下文迁移 — 将旧对话摘要注入新 session 的 system prompt。
+func (a *Agent) Summarize(ctx context.Context, model *foundation.Model, messages []foundation.Message, maxChars int) (string, error) {
+	if len(messages) == 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("请用中文生成这段对话的简洁摘要（不超过 ")
+	fmt.Fprintf(&sb, "%d", maxChars)
+	sb.WriteString(" 字符），只保留关键事实、偏好和决策：\n\n")
+	for _, m := range messages {
+		switch m.Role {
+		case foundation.RoleUser:
+			sb.WriteString("用户：")
+		case foundation.RoleAssistant:
+			sb.WriteString("助手：")
+		case foundation.RoleSystem:
+			sb.WriteString("系统：")
+		case foundation.RoleTool:
+			sb.WriteString("工具：")
+		}
+		content := m.Content
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+		sb.WriteString(content)
+		sb.WriteString("\n")
+	}
+
+	// 直接调 deepseek client，空工具列表 → 避免 remember_fact 等工具被触发
+	apiKey := ""
+	apiURL := "https://api.deepseek.com/v1"
+	if key, ok := model.Options["api_key"].(string); ok && key != "" {
+		apiKey = key
+	}
+	if url, ok := model.Options["api_url"].(string); ok && url != "" {
+		apiURL = url
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("DEEPSEEK_API_KEY")
+	}
+	if envURL := os.Getenv("DEEPSEEK_API_URL"); envURL != "" {
+		apiURL = envURL
+	}
+	modelName := model.Name
+	if modelName == "" {
+		modelName = os.Getenv("DEEPSEEK_MODEL")
+	}
+	modelName = normalizeModelName(modelName)
+	if modelName == "" {
+		modelName = "deepseek-chat"
+	}
+
+	client := deepseek.NewClient(apiKey, apiURL, modelName)
+	summMsgs := []foundation.Message{
+		{Role: foundation.RoleSystem, Content: "你是一个精确、简洁的摘要生成器。"},
+		{Role: foundation.RoleUser, Content: sb.String()},
+	}
+	resp, err := client.Chat(deepseek.ConvertMessages(summMsgs), nil, 1000, "low")
+	if err != nil {
+		return "", fmt.Errorf("summary call failed: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("summary call returned no choices")
+	}
+	summary := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if len(summary) > maxChars {
+		summary = summary[:maxChars] + "..."
+	}
+	a.logger.Printf("[Agent] Summarize: %d messages → %d chars", len(messages), len(summary))
+	return summary, nil
+}
+
 // ExecuteStreaming runs the ReAct loop with streaming callbacks for each event.
 func (a *Agent) ExecuteStreaming(ctx context.Context, model *foundation.Model, systemPrompt string, history []foundation.Message, userQuery string, onEvent StreamCallback) error {
 	a.logger.Printf("[Agent] ExecuteStreaming: query=%q model=%s history=%d", userQuery, model.Name, len(history))

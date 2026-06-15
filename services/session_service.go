@@ -37,9 +37,24 @@ func NewSessionService(mgr *session.Manager) *SessionService {
 	return &SessionService{mgr: mgr}
 }
 
-// GetOrCreate 获取或创建会话，返回完整 Session 供业务层使用。
+// GetOrCreate 获取或创建会话。
+// 新的逻辑：过期 7 天窗口内可续期；超过 7 天创建新 session，且 MetaData 写入 replaced_from。
 func (s *SessionService) GetOrCreate(ctx context.Context, id, userID string) (*session.Session, error) {
 	return s.mgr.GetOrCreate(ctx, id, userID)
+}
+
+// RenewSession 主动续期：刷新 ExpiresAt 并将状态恢复为 ACTIVE。
+func (s *SessionService) RenewSession(ctx context.Context, sessionID, userID string) (*session.Session, error) {
+	return s.mgr.Renew(ctx, sessionID, userID)
+}
+
+// GetSessionMessages 返回指定会话的原始消息数组，供摘要生成或前端显示。
+func (s *SessionService) GetSessionMessages(ctx context.Context, sessionID, userID string) ([]foundation.Message, error) {
+	sess, err := s.mgr.Get(ctx, sessionID, userID)
+	if err != nil {
+		return nil, err
+	}
+	return sess.Messages, nil
 }
 
 // AppendUserMessage 追加用户消息并返回更新后的 Session。
@@ -49,12 +64,13 @@ func (s *SessionService) AppendUserMessage(ctx context.Context, id, userID, cont
 }
 
 // AppendAssistantMessage 追加 assistant 消息（仅落盘，不返回 Session）。
-func (s *SessionService) AppendAssistantMessage(ctx context.Context, id, userID, content string) {
+func (s *SessionService) AppendAssistantMessage(ctx context.Context, id, userID, content string) error {
 	if content == "" {
-		return
+		return nil
 	}
 	msg := foundation.Message{Role: foundation.RoleAssistant, Content: content}
-	_, _ = s.mgr.Append(ctx, id, userID, msg)
+	_, err := s.mgr.Append(ctx, id, userID, msg)
+	return err
 }
 
 // RecordError 记录会话错误，超过阈值自动置为 ERROR 状态。

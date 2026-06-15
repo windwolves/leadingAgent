@@ -12,6 +12,7 @@ import (
 type Manager struct {
 	repo         Repository
 	ttl          time.Duration
+	renewWindow  time.Duration
 	maxPerUser   int
 	maxMessages  int
 	systemPrompt string
@@ -26,16 +27,18 @@ type Manager struct {
 
 type ManagerOption func(*Manager)
 
-func WithTTL(ttl time.Duration) ManagerOption { return func(m *Manager) { m.ttl = ttl } }
-func WithMaxPerUser(n int) ManagerOption      { return func(m *Manager) { m.maxPerUser = n } }
-func WithMaxMessages(n int) ManagerOption     { return func(m *Manager) { m.maxMessages = n } }
-func WithSystemPrompt(p string) ManagerOption { return func(m *Manager) { m.systemPrompt = p } }
+func WithTTL(ttl time.Duration) ManagerOption       { return func(m *Manager) { m.ttl = ttl } }
+func WithRenewWindow(d time.Duration) ManagerOption { return func(m *Manager) { m.renewWindow = d } }
+func WithMaxPerUser(n int) ManagerOption            { return func(m *Manager) { m.maxPerUser = n } }
+func WithMaxMessages(n int) ManagerOption           { return func(m *Manager) { m.maxMessages = n } }
+func WithSystemPrompt(p string) ManagerOption       { return func(m *Manager) { m.systemPrompt = p } }
 
-// NewManager 创建 Manager。默认 TTL=1h，后台每 60s 回收过期会话。
+// NewManager 创建 Manager。默认 TTL=1h，续期窗口=7 天，后台每 60s 回收过期会话。
 func NewManager(repo Repository, opts ...ManagerOption) *Manager {
 	m := &Manager{
 		repo:         repo,
 		ttl:          time.Hour,
+		renewWindow:  7 * 24 * time.Hour,
 		maxPerUser:   100,
 		maxMessages:  200,
 		systemPrompt: "You are a helpful assistant. When you learn personal facts about the user (name, preferences, technical background, etc.), call the remember_fact tool to save them for future conversations. Always include the userId parameter.",
@@ -108,7 +111,8 @@ func (m *Manager) Create(ctx context.Context, id, userID string) (*Session, erro
 	return s, nil
 }
 
-// Get 获取会话（只读副本）。如果会话已过期/终结会返回对应错误。
+// Get 获取会话（只读副本）。只做 userID 水平越权校验，不拒绝过期会话。
+// 过期/终态的拒绝放在写操作（Append）中。
 func (m *Manager) Get(ctx context.Context, id, userID string) (*Session, error) {
 	if id == "" {
 		return nil, ErrInvalid
@@ -121,23 +125,82 @@ func (m *Manager) Get(ctx context.Context, id, userID string) (*Session, error) 
 		// 水平越权防护：不匹配 userID 则当作不存在。
 		return nil, ErrNotFound
 	}
-	if s.ExpiresAt.Before(time.Now().UTC()) {
-		_ = m.markExpired(ctx, s)
-		return nil, ErrExpired
+	return s, nil
+}
+
+// Renew 刷新会话的过期时间为 now + ttl，并将状态恢复为 ACTIVE。
+// 可续期窗口：过期了 renewWindow 之内 或 renewWindow 内即将过期。
+// 超过窗口的会话不可续期，返回 ErrGone，由上层决定是否创建新 session 并生成摘要。
+func (m *Manager) Renew(ctx context.Context, id, userID string) (*Session, error) {
+	if id == "" {
+		return nil, ErrInvalid
+	}
+	mu := m.lockFor(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	s, err := m.repo.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if userID != "" && s.UserID != userID {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	diff := now.Sub(s.ExpiresAt) // > 0 表示已过期，< 0 表示未过期
+	hasMessages := len(s.Messages) > 0
+
+	// 拒绝条件：已过期超过 renewWindow 且 有内容 → 太久远，不可续期
+	// 其他情况均放行：未过期 / 在窗口内过期 / 即将过期 / 空会话
+	if hasMessages && diff > 0 && diff >= m.renewWindow {
+		return nil, ErrGone
+	}
+
+	s.State = StateActive
+	s.UpdatedAt = now
+	s.ExpiresAt = now.Add(m.ttl)
+	s.Version++
+	if err := m.repo.Update(ctx, s); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
 
 // GetOrCreate 查现有会话或新建一个（id 为空时内部生成）。
+// 改进逻辑：
+//   - 若会话在 7 天可续期窗口内 → Renew 它，继续复用
+//   - 若会话太老（> 7 天） → 创建新 session，Meta 中写入 replaced_from 供上层生成摘要
 func (m *Manager) GetOrCreate(ctx context.Context, id, userID string) (*Session, error) {
 	if id == "" {
 		return m.Create(ctx, "", userID)
 	}
 	s, err := m.Get(ctx, id, userID)
 	if err == nil {
-		return s, nil
+		now := time.Now().UTC()
+		needsRenew := s.State.IsTerminal() || s.ExpiresAt.Before(now)
+		if !needsRenew {
+			// 会话仍然有效，直接返回
+			return s, nil
+		}
+		// 过期或已终态 → 尝试续期（7 天窗口内会成功）
+		renewed, renewErr := m.Renew(ctx, id, userID)
+		if renewErr == nil {
+			return renewed, nil
+		}
+		// 不可续期 → 创建新 session，并把旧 session ID 写入 MetaData
+		newSess, createErr := m.Create(ctx, "", userID)
+		if createErr != nil {
+			return nil, createErr
+		}
+		if len(s.Messages) > 0 {
+			if newSess.MetaData == nil {
+				newSess.MetaData = make(map[string]interface{})
+			}
+			newSess.MetaData["replaced_from"] = s.ID
+		}
+		return newSess, nil
 	}
-	return m.Create(ctx, id, userID)
+	return m.Create(ctx, "", userID)
 }
 
 // Append 在会话尾部追加消息，推进版本号，刷新过期时间，落盘。

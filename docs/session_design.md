@@ -99,6 +99,7 @@ type Repository interface {
 构造：`NewManager(repo, ...opts)`，选项：
 
 - `WithTTL(ttl)`：滑动过期窗口（默认 1h）
+- `WithRenewWindow(d)`：续期宽限期（默认 7 天）；过期 7 天内的 session 仍可被恢复
 - `WithMaxPerUser(n)`：单用户最多活跃会话（软上限，超出时最旧的自动进入 `COMPLETED`）
 - `WithMaxMessages(n)`：单会话消息数上限
 - `WithSystemPrompt(p)`：新建会话时使用的默认 system prompt
@@ -107,11 +108,15 @@ type Repository interface {
 
 - `Create(ctx, userID)`：新建，立即落盘。
 - `Get(ctx, id, userID)`：读取，强制用户一致性校验。
-- `GetOrCreate(ctx, id, userID)`：便捷方法，客户端 `sessionId` 为空时自动创建。
-- `Append(ctx, id, userID, msgs...)`：追加 + 刷新 `ExpiresAt` + 推进 `Version`，内部带乐观锁重试。
-- `Touch(ctx, id, userID)`：心跳刷活。
-- `Complete / Delete / ListByUser / RecordError`：终结态控制与审计。
-- 后台 `gcLoop`：每 60s 扫描 `ListExpired` 并标记为 `EXPIRED`。
+- `GetOrCreate(ctx, id, userID)`：**增强版**—按以下分支决策：
+  1. 会话仍活跃 → 直接返回
+  2. 会话过期 / 终态但在 `renewWindow` 内 → 调用 `Renew` 恢复（保留 ID，刷新 ExpiresAt）
+  3. 会话超期太久 → 创建新 session，并在 `MetaData["replaced_from"]` 写入旧 ID 供上层生成摘要注入
+- `Renew(ctx, id, userID)`：**新能力**—刷新 `ExpiresAt` 至 `now + ttl`，恢复至 `ACTIVE`；**仅当"过期超过 `renewWindow` 且 有内容"时**返回 `ErrGone`（空会话/未过期/在窗口内 均允许续期，参见 [session_manager.go:149-157](file:///Users/leading/Developer/Projects/leadingAgent/session/session_manager.go#L149-L157)）
+- `Append(ctx, id, userID, msgs...)`：追加 + 刷新 `ExpiresAt` + 推进 `Version`，内部带乐观锁重试
+- `Touch(ctx, id, userID)`：心跳刷活
+- `Complete / Delete / ListByUser / RecordError`：终结态控制与审计
+- 后台 `gcLoop`：每 60s 扫描 `ListExpired` 并标记为 `EXPIRED`
 
 参考实现：[session\_manager.go](file:///Users/leading/Developer/Projects/leadingAgent/session/session_manager.go)
 
@@ -125,8 +130,14 @@ type Repository interface {
                         │
                         ├── 连续错误 ≥ N ─► ERROR
                         ├── 用户主动结束 ─► COMPLETED
-                        ├── TTL 过期 ────► EXPIRED
-                        └── 消息数超限 ───► COMPLETED
+                        ├── TTL 过期 ────► EXPIRED ──┐
+                        └── 消息数超限 ───► COMPLETED  │
+                                                        │
+                                                        │  过期但在 renewWindow 内
+                                     ︎                       ▲
+                                                        │  Renew()
+                                                        │
+                           EXPIRED ──────────────────────┘
 
  COMPLETED / EXPIRED / ERROR ── 归档策略 ──► ARCHIVED
 ```
@@ -170,25 +181,67 @@ type Repository interface {
 
 ### 5.2 流式（StreamChat）
 
-- 先 `GetOrCreate` / `Append(user)`
+- 先 `GetOrCreate`：若旧 session 过期超 `renewWindow`，则创建新 session 并写入 `MetaData["replaced_from"]`
+- **摘要注入（best effort）**：检测到 `MetaData["replaced_from"]` 非空 → 调 `Agent.Summarize()` 生成旧对话摘要 → 注入 system prompt
+- `Append(user)`
 - `ExecuteStreaming` 过程中收集最终文本 `assistantContent`
 - 结束后 `Append(assistant)`，保留历史
 - 失败走 `RecordError(id, uid, 3)`
 
-参考代码：[handlers/agent\_handler.go StreamChat](file:///Users/leading/Developer/Projects/leadingAgent/handlers/agent_handler.go#L102-L141)
+参考代码：[handlers/agent\_handler.go StreamChat](file:///Users/leading/Developer/Projects/leadingAgent/handlers/agent_handler.go#L102-L141)、[services/agent\_service.go StreamChat](file:///Users/leading/Developer/Projects/leadingAgent/services/agent_service.go#L40-L108)
 
 ***
 
-## 6. 过期与回收策略
+## 6. 过期、续期与摘要策略
 
 | 机制     | 说明                                            |
 | ------ | --------------------------------------------- |
 | 滑动 TTL | 每次 `Append/Touch` 更新 `ExpiresAt = now + ttl`  |
 | 懒过期    | `Get` 时发现过期 → 直接改状态为 `EXPIRED`                |
+| 续期窗口    | `renewWindow`（默认 7 天）：过期 7 天内的 session 可被 `Renew()` 恢复，避免"稍过期即丢上下文" |
+| 摘要注入    | 当 session 过期超 `renewWindow` 时，`GetOrCreate` 新建 session 并在 `MetaData["replaced_from"]` 写入旧 ID；AgentService 检测到此字段后，调用 `Agent.Summarize()` 生成旧对话的中文摘要，以 `## 上一段对话的摘要` 注入新 session 的 system prompt |
 | 后台 GC  | `gcLoop` 每 60s 扫描 `ListExpired` 标记过期；扫描窗口 10s |
 | 会话数上限  | 单用户超过 `MaxPerUser`：最旧会话被置 `COMPLETED`         |
 | 消息数上限  | 单会话超过 `MaxMessages`：拒绝继续写入并置 `COMPLETED`      |
 | 错误熔断   | `RecordError` 超过阈值 → `ERROR`                  |
+
+### 续期决策表（GetOrCreate 行为）
+
+```
+session 状态                          | 结果
+------------------------------------- | -----------------------------
+  活跃（ExpiresAt > now，非 terminal） | 直接返回原 session
+  过期 / 终态 且 在 renewWindow 内     | Renew → 原 ID + 新 ExpiresAt
+  过期 > renewWindow                  | 新建 session + MetaData.replaced_from
+  不存在（新用户）                    | 新建 session
+```
+
+### Renew 内部决策（精确条件）
+
+`Renew` 的唯一拒绝条件：**已过期超过 `renewWindow` 且 `Messages` 非空**。其他情况一律允许续期：
+
+| 场景 | `diff = now - ExpiresAt` | `hasMessages` | Renew 结果 |
+|---|---|---|---|
+| 尚未过期（还有 30 天） | < 0 | true | ✅ 允许续期 |
+| 即将过期（还有 3 天） | < 0 | true | ✅ 允许续期 |
+| 过期 3 天（在窗口内） | +3d | true | ✅ 允许续期 |
+| 过期 30 天（超窗口，有内容） | +30d | true | ❌ `ErrGone` |
+| 过期 30 天（空会话） | +30d | false | ✅ 允许续期 |
+
+- 伪代码：`if hasMessages && diff > 0 && diff >= renewWindow → ErrGone`
+- 实现位置：[session_manager.go:149-157](file:///Users/leading/Developer/Projects/leadingAgent/session/session_manager.go#L149-L157)
+- 备注：旧版本条件 `!withinWindow && !willExpireSoon && hasMessages` 存在漏洞——未过期且距离到期还很远的会话会被错误拒绝，已修复为上述单一明确条件。
+
+### 摘要生成（Agent.Summarize）
+
+- **位置**：[agent/agent.go Summarize](file:///Users/leading/Developer/Projects/leadingAgent/agent/agent.go#L140-L212)
+- **调用时机**：`AgentService.StreamChat/Chat` 中检测到 `MetaData["replaced_from"]` 非空
+- **调用方式**：直接调 `deepseek.Chat`（空工具列表，不触发 `remember_fact` 等工具）
+- **参数**：`messages[]`（旧 session 全部消息）、`maxChars=500`
+- **产物**：中文简明摘要，以 `## 上一段对话的摘要` 段落拼入 system prompt
+- **失败策略**：best effort — 摘要生成失败不阻塞主对话，仅打 warning 日志
+
+参考：[services/agent_service.go StreamChat](file:///Users/leading/Developer/Projects/leadingAgent/services/agent_service.go#L40-L108)
 
 ***
 
@@ -262,7 +315,7 @@ go test  ./session/... -count=1
 1. **SQLite Repository 实现**：使用现有 `modernc.org/sqlite` 依赖，把 session 落盘，取代重启丢历史的问题。DONE
 2. **Agent 真正消费历史消息**：把 `Session.Messages` 注入 `agent.Agent.Execute(...)`，让多轮对话"真的能记得前文"。DONE
 3. **HMAC 签名 sessionId**：防止客户端篡改。
-4. **会话摘要**：在消息数达到阈值时，让模型生成一次「上下文摘要」，替换早期消息。
+4. **会话摘要（已实现）**：当 session 过期超过 `renewWindow` 时，通过 `Agent.Summarize()` 生成旧对话的中文摘要，注入新 session 的 system prompt，实现上下文平滑迁移。DONE（见 §6、[agent/agent.go Summarize](file:///Users/leading/Developer/Projects/leadingAgent/agent/agent.go#L140-L212)）
 5. **指标 & 审计**：让 `ToolCallMeta / TokenUsage` 与已有 `repository.CostRepository` 打通。
 6. **WAL + 回放启动**：为多实例部署下的写可靠性兜底。
 7. **工作记忆窗口管理**：当 `len(Messages)` 逼近模型 context window 时，对早期轮次做自动摘要压缩（summarize early turns），替换原始消息以控制 token 消耗，避免简单截断导致上下文丢失。
@@ -270,4 +323,5 @@ go test  ./session/... -count=1
 9. **情节记忆（Episodic Memory）**：引入 embedding 模型 + 向量数据库（如 Milvus / Pinecone / pgvector），对每段对话生成摘要 → 向量化 → 存入向量库。后续对话按语义相似度召回相关历史片段，作为额外上下文注入 LLM。
 10. **过程记忆（Procedural Memory / Skill）**：对高频业务流程（如"处理退款"、"生成周报"）抽象为可复用的工作流定义，支持 Agent 按意图匹配后加载对应 procedure，实现从"每次推理"到"模式复用"的跃升。
 11. **记忆优先级缓存**：高频访问的热点 session / user_facts 加一层 `sync.Map` 内存缓存，减少 SQLite 查询；缓存 TTL 与 session TTL 对齐，写穿透（write-through）保证一致性。
+12. **续期窗口可观测性**：`GetOrCreate` 触发 Renew / 摘要注入的次数接入 metrics（`session_renewals_total`、`session_summaries_total`），便于观察过期策略是否合理。
 
