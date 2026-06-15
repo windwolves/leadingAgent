@@ -33,10 +33,11 @@ func NewClient(apiKey, apiURL, model string) *Client {
 }
 
 type Message struct {
-	Role       string      `json:"role"`
-	Content    string      `json:"content,omitempty"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 type ToolCall struct {
@@ -52,8 +53,8 @@ type FunctionCall struct {
 }
 
 type ToolDef struct {
-	Type     string           `json:"type"`
-	Function ToolDefFunction  `json:"function"`
+	Type     string          `json:"type"`
+	Function ToolDefFunction `json:"function"`
 }
 
 type ToolDefFunction struct {
@@ -63,10 +64,12 @@ type ToolDefFunction struct {
 }
 
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Tools    []ToolDef `json:"tools,omitempty"`
-	Stream   bool      `json:"stream,omitempty"`
+	Model           string    `json:"model"`
+	Messages        []Message `json:"messages"`
+	Tools           []ToolDef `json:"tools,omitempty"`
+	Stream          bool      `json:"stream,omitempty"`
+	MaxTokens       int       `json:"max_tokens,omitempty"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
 }
 
 type ChatResponse struct {
@@ -75,9 +78,9 @@ type ChatResponse struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index   int      `json:"index"`
-		Message Message  `json:"message"`
-		Finish  string   `json:"finish_reason"`
+		Index   int     `json:"index"`
+		Message Message `json:"message"`
+		Finish  string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -103,11 +106,13 @@ type StreamChatResponse struct {
 	} `json:"usage,omitempty"`
 }
 
-func (c *Client) Chat(messages []Message, tools []ToolDef) (*ChatResponse, error) {
+func (c *Client) Chat(messages []Message, tools []ToolDef, maxTokens int, reasoningEffort string) (*ChatResponse, error) {
 	req := &ChatRequest{
-		Model:    c.model,
-		Messages: messages,
-		Tools:    tools,
+		Model:           c.model,
+		Messages:        messages,
+		Tools:           tools,
+		MaxTokens:       maxTokens,
+		ReasoningEffort: reasoningEffort,
 	}
 
 	var resp ChatResponse
@@ -123,12 +128,14 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (*ChatResponse, error
 	return &resp, nil
 }
 
-func (c *Client) StreamChat(messages []Message, tools []ToolDef, handler func(*StreamChatResponse) error) error {
+func (c *Client) StreamChat(messages []Message, tools []ToolDef, maxTokens int, reasoningEffort string, handler func(*StreamChatResponse) error) error {
 	req := &ChatRequest{
-		Model:    c.model,
-		Messages: messages,
-		Tools:    tools,
-		Stream:   true,
+		Model:           c.model,
+		Messages:        messages,
+		Tools:           tools,
+		Stream:          true,
+		MaxTokens:       maxTokens,
+		ReasoningEffort: reasoningEffort,
 	}
 
 	jsonData, err := json.Marshal(req)

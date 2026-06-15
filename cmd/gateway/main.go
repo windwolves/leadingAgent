@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"leadingAgent/agent"
 	"leadingAgent/agent/foundation"
+	"leadingAgent/agent/tools"
 	"leadingAgent/config"
 	"leadingAgent/handlers"
+	"leadingAgent/memory"
 	"leadingAgent/services"
 	"leadingAgent/session"
 )
@@ -22,6 +25,18 @@ func main() {
 	apiURL := os.Getenv("DEEPSEEK_API_URL")
 	modelName := os.Getenv("DEEPSEEK_MODEL")
 
+	maxTokens := 4096
+	if raw := os.Getenv("DEEPSEEK_MAX_TOKENS"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			maxTokens = v
+		}
+	}
+
+	reasoningEffort := "low"
+	if raw := os.Getenv("DEEPSEEK_REASONING_EFFORT"); raw != "" {
+		reasoningEffort = raw
+	}
+
 	if cfg, err := config.LoadConfig(); err == nil {
 		if cfg.DeepSeekAPIKey != "" {
 			apiKey = cfg.DeepSeekAPIKey
@@ -31,6 +46,12 @@ func main() {
 		}
 		if cfg.DeepSeekModel != "" {
 			modelName = cfg.DeepSeekModel
+		}
+		if cfg.DeepSeekMaxTokens > 0 {
+			maxTokens = cfg.DeepSeekMaxTokens
+		}
+		if cfg.DeepSeekReasoningEffort != "" {
+			reasoningEffort = cfg.DeepSeekReasoningEffort
 		}
 	}
 
@@ -44,11 +65,13 @@ func main() {
 	model := &foundation.Model{
 		Name: modelName,
 		Options: map[string]interface{}{
-			"api_key": apiKey,
-			"api_url": apiURL,
+			"api_key":           apiKey,
+			"api_url":           apiURL,
+			"max_tokens":        maxTokens,
+			"reasoning_effort":  reasoningEffort,
 		},
 	}
-	log.Printf("[Gateway] model=%s apiURL=%s", modelName, apiURL)
+	log.Printf("[Gateway] model=%s apiURL=%s maxTokens=%d reasoningEffort=%s", modelName, apiURL, maxTokens, reasoningEffort)
 
 	// -------- 2) SQLite 仓库 + session.Manager --------
 	dbPath := os.Getenv("SESSION_DB")
@@ -69,15 +92,29 @@ func main() {
 	)
 	defer mgr.Close()
 
-	// -------- 3) SessionService → AgentService → Handler --------
+	// -------- 3) Memory 链路 --------
+	memDir := os.Getenv("MEMORY_DIR")
+	if memDir == "" {
+		memDir = filepath.Join("data", "memories")
+	}
+	memProvider, err := memory.NewMarkdownProvider(memDir)
+	if err != nil {
+		log.Fatalf("[Gateway] failed to init memory: %v", err)
+	}
+	memSvc := services.NewMemoryService(memProvider)
+
+	// 注入 remember_fact 工具的回调
+	tools.SetWriteMemoryFunc(memSvc.Remember)
+
+	// -------- 4) SessionService → AgentService → Handler --------
 	a := agent.NewAgent()
 	defer a.Close()
 
 	sessSvc := services.NewSessionService(mgr)
-	svc := services.NewAgentService(a, model, sessSvc)
+	svc := services.NewAgentService(a, model, sessSvc, memSvc)
 	ah := handlers.NewAgentHandler(svc, sessSvc)
 
-	// -------- 4) 路由注册 --------
+	// -------- 5) 路由注册 --------
 	http.HandleFunc("/api/chat", ah.HandleChat)
 	http.HandleFunc("/api/sessions", ah.HandleSessions)
 	http.HandleFunc("/api/sessions/messages", ah.HandleGetSessionMessages)

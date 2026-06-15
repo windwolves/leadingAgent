@@ -38,6 +38,10 @@ func NewAgentHandler(svc *services.AgentService, sessSvc *services.SessionServic
 
 // HandleChat 处理 POST /api/chat，流式 SSE 响应。
 func (h *AgentHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -62,7 +66,6 @@ func (h *AgentHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
@@ -90,6 +93,10 @@ func (h *AgentHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 // HandleSessions 处理 /api/sessions（GET 列表 / DELETE 删除）。
 func (h *AgentHandler) HandleSessions(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		h.handleListSessions(w, r)
@@ -148,6 +155,10 @@ func (h *AgentHandler) handleDeleteSession(w http.ResponseWriter, r *http.Reques
 
 // HandleGetSessionMessages 处理 GET /api/sessions/messages。
 func (h *AgentHandler) HandleGetSessionMessages(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -179,6 +190,13 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// setCORS 统一设置跨域响应头，并处理 OPTIONS 预检请求。
+func setCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 }
 
 // handleChatFallback 非流式降级处理，返回普通 JSON。

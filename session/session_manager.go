@@ -38,7 +38,7 @@ func NewManager(repo Repository, opts ...ManagerOption) *Manager {
 		ttl:          time.Hour,
 		maxPerUser:   100,
 		maxMessages:  200,
-		systemPrompt: "You are a helpful assistant.",
+		systemPrompt: "You are a helpful assistant. When you learn personal facts about the user (name, preferences, technical background, etc.), call the remember_fact tool to save them for future conversations. Always include the userId parameter.",
 		locks:        make(map[string]*sync.Mutex),
 		stopCh:       make(chan struct{}),
 	}

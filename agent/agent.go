@@ -94,6 +94,7 @@ func loadTools() []Tool {
 		tools.NewGlobSearchTool(),
 		tools.NewGrepSearchTool(),
 		tools.NewBingSearchTool(),
+		tools.NewRememberFactTool(),
 	}
 }
 
@@ -105,7 +106,7 @@ func (a *Agent) Close() error {
 	return nil
 }
 
-const defaultSystemPrompt = "You are a helpful assistant. When you need information, use the available tools to search or take action."
+const defaultSystemPrompt = "You are a helpful assistant. When you need information, use the available tools to search or take action. When you learn personal facts about the user, use the remember_fact tool to save them."
 
 func (a *Agent) Execute(ctx context.Context, model *foundation.Model, systemPrompt string, history []foundation.Message, userQuery string) (string, error) {
 	a.logger.Printf("[Agent] Execute: query=%q model=%s history=%d", userQuery, model.Name, len(history))
@@ -284,6 +285,10 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 
 	modelName := model.Name
 	if modelName == "" {
+		modelName = os.Getenv("DEEPSEEK_MODEL")
+	}
+	modelName = normalizeModelName(modelName)
+	if modelName == "" {
 		modelName = "deepseek-chat"
 	}
 
@@ -292,7 +297,19 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 	deepseekMessages := deepseek.ConvertMessages(messages)
 	toolDefs := a.buildToolDefinitions()
 
-	resp, err := client.Chat(deepseekMessages, toolDefs)
+	maxTokens := 4096
+	if v, ok := model.Options["max_tokens"].(int); ok && v > 0 {
+		maxTokens = v
+	} else if f, ok := model.Options["max_tokens"].(float64); ok && f > 0 {
+		maxTokens = int(f)
+	}
+
+	reasoningEffort := "low"
+	if v, ok := model.Options["reasoning_effort"].(string); ok && v != "" {
+		reasoningEffort = v
+	}
+
+	resp, err := client.Chat(deepseekMessages, toolDefs, maxTokens, reasoningEffort)
 	if err != nil {
 		return nil, fmt.Errorf("DeepSeek API call failed: %w", err)
 	}
@@ -303,8 +320,16 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 
 	choice := resp.Choices[0]
 	foundationMsg := &foundation.Message{
-		Role:    foundation.RoleAssistant,
-		Content: choice.Message.Content,
+		Role: foundation.RoleAssistant,
+	}
+	if choice.Message.ReasoningContent != "" {
+		// V4 模型的推理内容放在 content 前，方便前端/下游处理
+		foundationMsg.Content = choice.Message.ReasoningContent
+		if choice.Message.Content != "" {
+			foundationMsg.Content = choice.Message.ReasoningContent + "\n\n" + choice.Message.Content
+		}
+	} else {
+		foundationMsg.Content = choice.Message.Content
 	}
 
 	if len(choice.Message.ToolCalls) > 0 {
@@ -349,12 +374,29 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 
 	modelName := model.Name
 	if modelName == "" {
+		modelName = os.Getenv("DEEPSEEK_MODEL")
+	}
+	// DeepSeek API 只接受小写的模型名。常见的有效名称：deepseek-chat / deepseek-reasoner / deepseek-v4-flash / deepseek-v4-pro
+	modelName = normalizeModelName(modelName)
+	if modelName == "" {
 		modelName = "deepseek-chat"
 	}
 
 	client := deepseek.NewClient(apiKey, apiURL, modelName)
 	deepseekMessages := deepseek.ConvertMessages(messages)
 	toolDefs := a.buildToolDefinitions()
+
+	maxTokens := 4096
+	if v, ok := model.Options["max_tokens"].(int); ok && v > 0 {
+		maxTokens = v
+	} else if f, ok := model.Options["max_tokens"].(float64); ok && f > 0 {
+		maxTokens = int(f)
+	}
+
+	reasoningEffort := "low"
+	if v, ok := model.Options["reasoning_effort"].(string); ok && v != "" {
+		reasoningEffort = v
+	}
 
 	var (
 		fullContent   strings.Builder
@@ -365,12 +407,18 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 	// DeepSeek streams tool_calls incrementally across chunks with the same index.
 	toolCallMap := make(map[int]*foundation.ToolUseContent) // index → partial tool call
 
-	err := client.StreamChat(deepseekMessages, toolDefs, func(streamResp *deepseek.StreamChatResponse) error {
+	err := client.StreamChat(deepseekMessages, toolDefs, maxTokens, reasoningEffort, func(streamResp *deepseek.StreamChatResponse) error {
 		if len(streamResp.Choices) == 0 {
 			return nil
 		}
 
 		delta := streamResp.Choices[0].Delta
+
+		// Stream reasoning content (V4 / reasoner models)
+		if delta.ReasoningContent != "" {
+			fullContent.WriteString(delta.ReasoningContent)
+			onEvent(StreamEvent{Type: StreamEventTextDelta, Content: delta.ReasoningContent})
+		}
 
 		// Stream text deltas
 		if delta.Content != "" {
@@ -479,4 +527,15 @@ func (a *Agent) buildToolDefinitions() []deepseek.ToolDef {
 		})
 	}
 	return defs
+}
+
+// normalizeModelName 将任意大小写的模型名规范化为 DeepSeek API 接受的格式。
+// 接受的格式：deepseek-chat / deepseek-reasoner / deepseek-v4-flash / deepseek-v4-pro
+// 传入空字符串或无法识别的名称时返回空字符串（由调用方决定默认值）。
+func normalizeModelName(name string) string {
+	// DeepSeek 接受的合法模型名（全小写）。
+	// - deepseek-chat: 基础模型，无推理内容
+	// - deepseek-v4-flash / deepseek-v4-pro / deepseek-reasoner: 会生成 reasoning_content
+	trimmed := strings.ToLower(strings.TrimSpace(name))
+	return trimmed
 }

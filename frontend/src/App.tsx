@@ -37,6 +37,8 @@ function App() {
   const [isLoading, setIsLoading] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const didInit = useRef(false)
+  const abortRef = useRef<AbortController | null>(null)
+  const loadingRef = useRef(false)
 
   useEffect(() => {
     if (didInit.current) return
@@ -52,6 +54,15 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
+
+  // 组件卸载时取消正在进行的请求
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) {
+        abortRef.current.abort()
+      }
+    }
+  }, [])
 
   async function loadSessions(): Promise<string | null> {
     try {
@@ -101,8 +112,7 @@ function App() {
     setMessages([])
   }
 
-  async function handleDeleteSession(sessionId: string, event: React.MouseEvent) {
-    event.stopPropagation()
+  async function handleDeleteSession(sessionId: string) {
     try {
       await fetch('/api/sessions', {
         method: 'DELETE',
@@ -110,10 +120,10 @@ function App() {
         body: JSON.stringify({ sessionId, userId }),
       })
     } catch {
-      // ignore failure silently
+      // ignore network errors
     }
-    const remaining = sessions.filter((s) => s.id !== sessionId)
-    setSessions(remaining)
+    // 请求完成后（无论成败）再更新 UI，避免 fetch 期间 React 重渲染导致 abort
+    setSessions((prev) => prev.filter((s) => s.id !== sessionId))
     if (activeSessionId === sessionId) {
       setActiveSessionId('')
       setMessages([])
@@ -121,7 +131,17 @@ function App() {
   }
 
   async function handleSendMessage(content: string) {
-    if (!content.trim() || isLoading) return
+    // 用同步 ref 防重复提交，避免 React 状态更新的异步延迟问题
+    if (!content.trim() || loadingRef.current) return
+    loadingRef.current = true
+
+    // 取消上一次未完成的流式请求
+    if (abortRef.current) {
+      abortRef.current.abort()
+      abortRef.current = null
+    }
+    const abortController = new AbortController()
+    abortRef.current = abortController
 
     const userMessage: Message = {
       id: `u-${Date.now()}`,
@@ -134,7 +154,6 @@ function App() {
     const assistantId = `a-${Date.now()}`
     let accumulatedContent = ''
 
-    // 新会话（activeSessionId 为空）时第一次发消息后端会自动创建 session。
     const sessionIdToSend = activeSessionId
 
     try {
@@ -146,6 +165,7 @@ function App() {
           sessionId: sessionIdToSend,
           userId,
         }),
+        signal: abortController.signal,
       })
 
       if (!resp.ok) {
@@ -215,10 +235,11 @@ function App() {
                 }
                 break
               case 'done':
-                if (evt.content) {
+                const finalText = evt.content && evt.content.trim() !== '' ? evt.content : accumulatedContent
+                if (finalText && finalText.trim() !== '') {
                   setMessages((prev) =>
                     prev.map((m) =>
-                      m.id === assistantId ? { ...m, content: evt.content! } : m,
+                      m.id === assistantId ? { ...m, content: finalText } : m,
                     ),
                   )
                 }
@@ -237,15 +258,29 @@ function App() {
         }
       }
 
+      // 流式完成后：如果 assistant 消息没有有效内容，清理 "思考中..." 占位。
+      if (accumulatedContent.trim() === '') {
+        setMessages((prev) => prev.filter((m) => m.id !== assistantId))
+      }
+
       // 新会话：把 activeSessionId 设为后端返回的 id，并刷新列表。
       if (!activeSessionId && receivedSessionId) {
         setActiveSessionId(receivedSessionId)
       }
+
+      // 请求正常完成后立即清除 abortRef，避免下一次调用时误 abort 已完成的请求
+      abortRef.current = null
       await loadSessions()
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        // 请求被取消（用户发新消息或组件卸载），静默处理
+        return
+      }
       const errMsg = error instanceof Error ? error.message : '网络错误'
       setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: errMsg }])
     } finally {
+      abortRef.current = null
+      loadingRef.current = false
       setIsLoading(false)
     }
   }
@@ -273,33 +308,30 @@ function App() {
           ) : (
             <ul className="space-y-1 px-2 pb-4">
               {sessions.map((s) => (
-              <li key={s.id}>
+              <li key={s.id} className="group flex items-stretch gap-0.5">
                 <button
                   type="button"
                   onClick={() => handleSelectSession(s.id)}
                   className={
-                    'group w-full text-left px-3 py-2 rounded-md transition-colors ' +
+                    'flex-1 text-left px-3 py-2 rounded-md transition-colors ' +
                     (activeSessionId === s.id
                       ? 'bg-white/10 text-white'
                       : 'hover:bg-white/5 text-slate-200')
                   }
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm font-medium truncate">
-                      {s.preview ? s.preview : '(空会话)'}
-                    </div>
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => handleDeleteSession(s.id, e)}
-                      className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-400 text-xs cursor-pointer"
-                    >
-                      删除
-                    </span>
+                  <div className="text-sm font-medium truncate">
+                    {s.preview ? s.preview : '(空会话)'}
                   </div>
                   <div className="text-xs text-slate-500 mt-1">
                     {new Date(s.updated_at).toLocaleString()}
                   </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteSession(s.id)}
+                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-400 text-xs px-2 rounded-md transition-opacity shrink-0"
+                >
+                  删除
                 </button>
               </li>
             ))}

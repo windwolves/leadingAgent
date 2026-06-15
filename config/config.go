@@ -5,9 +5,11 @@ import (
 )
 
 type Config struct {
-	DeepSeekAPIKey string `mapstructure:"DEEPSEEK_API_KEY"`
-	DeepSeekAPIURL string `mapstructure:"DEEPSEEK_API_URL"`
-	DeepSeekModel  string `mapstructure:"DEEPSEEK_MODEL"`
+	DeepSeekAPIKey          string `mapstructure:"DEEPSEEK_API_KEY"`
+	DeepSeekAPIURL          string `mapstructure:"DEEPSEEK_API_URL"`
+	DeepSeekModel           string `mapstructure:"DEEPSEEK_MODEL"`
+	DeepSeekMaxTokens       int    `mapstructure:"DEEPSEEK_MAX_TOKENS"`
+	DeepSeekReasoningEffort string `mapstructure:"DEEPSEEK_REASONING_EFFORT"`
 }
 
 func LoadConfig() (*Config, error) {

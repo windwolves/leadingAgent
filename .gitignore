@@ -55,3 +55,4 @@ test_output/
 data/sessions.db-shm
 data/sessions.db-wal
 gateway
+data/
