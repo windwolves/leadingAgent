@@ -56,3 +56,4 @@ data/sessions.db-shm
 data/sessions.db-wal
 gateway
 data/
+.trae/documents/

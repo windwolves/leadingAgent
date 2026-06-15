@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"golang.org/x/net/html"
 )
 
 const (
 	bingSearchEndpoint = "https://api.bing.microsoft.com/v7.0/search"
-	ddgSearchEndpoint  = "https://api.duckduckgo.com/"
+	ddgSearchEndpoint  = "https://html.duckduckgo.com/html/"
 )
 
 type BingSearchExecutor struct {
@@ -266,14 +268,10 @@ func (e *DuckDuckGoExecutor) Execute(ctx context.Context, params map[string]inte
 		count = 1
 	}
 
+	// DuckDuckGo HTML 搜索（零依赖、真正的网页搜索结果）
 	resp, err := e.client.R().
 		SetContext(ctx).
-		SetQueryParams(map[string]string{
-			"q":       query,
-			"format":  "json",
-			"no_html": "1",
-			"skip_disambig": "1",
-		}).
+		SetQueryParam("q", query).
 		Get(ddgSearchEndpoint)
 
 	if err != nil {
@@ -284,47 +282,11 @@ func (e *DuckDuckGoExecutor) Execute(ctx context.Context, params map[string]inte
 
 	if resp.IsError() {
 		return NewErrorResult("web_search", "search",
-			fmt.Sprintf("DuckDuckGo API returned HTTP %d: %s", resp.StatusCode(), string(resp.Body())),
-			"API_ERROR", time.Since(startTime), "DuckDuckGo API错误")
+			fmt.Sprintf("DuckDuckGo returned HTTP %d", resp.StatusCode()),
+			"API_ERROR", time.Since(startTime), "DuckDuckGo错误")
 	}
 
-	var ddgResp DuckDuckGoResponse
-	if err := json.Unmarshal(resp.Body(), &ddgResp); err != nil {
-		return NewErrorResult("web_search", "search",
-			fmt.Sprintf("Failed to parse DuckDuckGo response: %v", err),
-			"PARSE_FAILED", time.Since(startTime), "解析搜索结果失败")
-	}
-
-	items := make([]map[string]interface{}, 0, len(ddgResp.RelatedTopics))
-	for _, topic := range ddgResp.RelatedTopics {
-		if topic.Text == "" {
-			continue
-		}
-		item := map[string]interface{}{
-			"snippet": topic.Text,
-		}
-		if topic.FirstURL != "" {
-			u, parseErr := url.Parse(topic.FirstURL)
-			if parseErr == nil {
-				item["url"] = topic.FirstURL
-				item["display_url"] = u.Host + u.Path
-			}
-		}
-		items = append(items, item)
-	}
-
-	if ddgResp.AbstractText != "" {
-		abstractItem := map[string]interface{}{
-			"snippet":     ddgResp.AbstractText,
-			"url":         ddgResp.AbstractURL,
-			"display_url": ddgResp.AbstractSource,
-		}
-		items = append([]map[string]interface{}{abstractItem}, items...)
-	}
-
-	if len(items) > count {
-		items = items[:count]
-	}
+	items := parseDDGHTML(resp.Body(), count)
 
 	total := int64(len(items))
 	result := map[string]interface{}{
@@ -339,15 +301,113 @@ func (e *DuckDuckGoExecutor) Execute(ctx context.Context, params map[string]inte
 		fmt.Sprintf("DuckDuckGo搜索完成，返回 %d 条相关结果", len(items)))
 }
 
-type DuckDuckGoResponse struct {
-	AbstractText   string      `json:"AbstractText"`
-	AbstractURL    string      `json:"AbstractURL"`
-	AbstractSource string      `json:"AbstractSource"`
-	Heading        string      `json:"Heading"`
-	RelatedTopics  []DDGTopic  `json:"RelatedTopics"`
-}
+// parseDDGHTML 从 DuckDuckGo HTML 搜索结果页提取标题、链接和摘要。
+// DDG HTML 页面结构示例：
+//
+//	<div class="result">
+//	  <a class="result__a" href="...">Title</a>
+//	  <a class="result__snippet">Snippet text...</a>
+//	  <a class="result__url">example.com/path</a>
+//	</div>
+func parseDDGHTML(body []byte, maxResults int) []map[string]interface{} {
+	doc, err := html.Parse(strings.NewReader(string(body)))
+	if err != nil {
+		return nil
+	}
 
-type DDGTopic struct {
-	FirstURL string `json:"FirstURL"`
-	Text     string `json:"Text"`
+	type rawResult struct {
+		url, title, snippet string
+	}
+	var results []rawResult
+	var current *rawResult
+
+	// 跟踪我们是否在 result 容器内
+	var inResult bool
+	var inLink, inSnippet bool
+
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			// 检测 result 容器: <div class="result..."> 或 <div class="results_links...">
+			if n.Data == "div" {
+				for _, a := range n.Attr {
+					if a.Key == "class" && (strings.Contains(a.Val, "result") || strings.Contains(a.Val, "results_links")) {
+						if current != nil && current.url != "" {
+							results = append(results, *current)
+						}
+						current = &rawResult{}
+						inResult = true
+						break
+					}
+				}
+			}
+
+			// 标题链接: <a class="result__a" href="...">
+			if n.Data == "a" && inResult && current != nil {
+				for _, a := range n.Attr {
+					if a.Key == "class" && strings.Contains(a.Val, "result__a") {
+						for _, aa := range n.Attr {
+							if aa.Key == "href" {
+								current.url = aa.Val
+							}
+						}
+						inLink = true
+						break
+					}
+					if a.Key == "class" && strings.Contains(a.Val, "result__snippet") {
+						inSnippet = true
+						break
+					}
+				}
+			}
+		}
+
+		if n.Type == html.TextNode {
+			if inLink && current != nil {
+				current.title += n.Data
+			}
+			if inSnippet && current != nil {
+				current.snippet += n.Data
+			}
+		}
+
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+
+		if n.Type == html.ElementNode {
+			if n.Data == "a" && inLink {
+				inLink = false
+			}
+			if n.Data == "a" && inSnippet {
+				inSnippet = false
+			}
+		}
+	}
+
+	walk(doc)
+
+	// 保存最后一个 result
+	if current != nil && current.url != "" {
+		results = append(results, *current)
+	}
+
+	// 转换为输出格式
+	items := make([]map[string]interface{}, 0, len(results))
+	for i, r := range results {
+		if i >= maxResults {
+			break
+		}
+		item := map[string]interface{}{
+			"title":   strings.TrimSpace(r.title),
+			"snippet": strings.TrimSpace(r.snippet),
+			"url":     r.url,
+		}
+		if u, err := url.Parse(r.url); err == nil {
+			item["display_url"] = u.Host + u.Path
+		}
+		items = append(items, item)
+	}
+
+	return items
 }

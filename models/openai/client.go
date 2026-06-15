@@ -1,4 +1,4 @@
-package deepseek
+package openai
 
 import (
 	"bufio"
@@ -64,12 +64,13 @@ type ToolDefFunction struct {
 }
 
 type ChatRequest struct {
-	Model           string    `json:"model"`
-	Messages        []Message `json:"messages"`
-	Tools           []ToolDef `json:"tools,omitempty"`
-	Stream          bool      `json:"stream,omitempty"`
-	MaxTokens       int       `json:"max_tokens,omitempty"`
-	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []Message       `json:"messages"`
+	Tools           []ToolDef       `json:"tools,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Thinking        json.RawMessage `json:"thinking,omitempty"`
 }
 
 type ChatResponse struct {
@@ -106,17 +107,18 @@ type StreamChatResponse struct {
 	} `json:"usage,omitempty"`
 }
 
-func (c *Client) Chat(messages []Message, tools []ToolDef, maxTokens int, reasoningEffort string) (*ChatResponse, error) {
+func (c *Client) Chat(messages []Message, tools []ToolDef, maxTokens int, reasoningEffort string, thinking json.RawMessage) (*ChatResponse, error) {
 	req := &ChatRequest{
 		Model:           c.model,
 		Messages:        messages,
 		Tools:           tools,
 		MaxTokens:       maxTokens,
 		ReasoningEffort: reasoningEffort,
+		Thinking:        thinking,
 	}
 
 	var resp ChatResponse
-	_, err := c.client.R().
+	httpResp, err := c.client.R().
 		SetBody(req).
 		SetResult(&resp).
 		Post("/chat/completions")
@@ -124,11 +126,14 @@ func (c *Client) Chat(messages []Message, tools []ToolDef, maxTokens int, reason
 	if err != nil {
 		return nil, err
 	}
+	if httpResp.StatusCode() != 200 {
+		return nil, fmt.Errorf("chat api: %s (status %d)", httpResp.String(), httpResp.StatusCode())
+	}
 
 	return &resp, nil
 }
 
-func (c *Client) StreamChat(messages []Message, tools []ToolDef, maxTokens int, reasoningEffort string, handler func(*StreamChatResponse) error) error {
+func (c *Client) StreamChat(messages []Message, tools []ToolDef, maxTokens int, reasoningEffort string, thinking json.RawMessage, handler func(*StreamChatResponse) error) error {
 	req := &ChatRequest{
 		Model:           c.model,
 		Messages:        messages,
@@ -136,6 +141,7 @@ func (c *Client) StreamChat(messages []Message, tools []ToolDef, maxTokens int, 
 		Stream:          true,
 		MaxTokens:       maxTokens,
 		ReasoningEffort: reasoningEffort,
+		Thinking:        thinking,
 	}
 
 	jsonData, err := json.Marshal(req)
@@ -143,9 +149,9 @@ func (c *Client) StreamChat(messages []Message, tools []ToolDef, maxTokens int, 
 		return err
 	}
 
-	httpClient := &http.Client{}
 	url := fmt.Sprintf("%s/chat/completions", c.apiURL)
 
+	httpClient := &http.Client{}
 	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return err

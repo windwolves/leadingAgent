@@ -20,7 +20,12 @@ import (
 )
 
 func main() {
-	// -------- 1) 加载模型配置 --------
+	// -------- 1) 加载模型配置（支持多 provider）--------
+	provider := os.Getenv("LLM_PROVIDER")
+	if provider == "" {
+		provider = "deepseek"
+	}
+
 	apiKey := os.Getenv("DEEPSEEK_API_KEY")
 	apiURL := os.Getenv("DEEPSEEK_API_URL")
 	modelName := os.Getenv("DEEPSEEK_MODEL")
@@ -38,42 +43,83 @@ func main() {
 	}
 
 	if cfg, err := config.LoadConfig(); err == nil {
-		if cfg.DeepSeekAPIKey != "" {
-			apiKey = cfg.DeepSeekAPIKey
-		}
-		if cfg.DeepSeekAPIURL != "" {
-			apiURL = cfg.DeepSeekAPIURL
-		}
-		if cfg.DeepSeekModel != "" {
-			modelName = cfg.DeepSeekModel
-		}
-		if cfg.DeepSeekMaxTokens > 0 {
-			maxTokens = cfg.DeepSeekMaxTokens
-		}
-		if cfg.DeepSeekReasoningEffort != "" {
-			reasoningEffort = cfg.DeepSeekReasoningEffort
+		switch provider {
+		case "doubao":
+			if cfg.DoubaoAPIKey != "" {
+				apiKey = cfg.DoubaoAPIKey
+			}
+			if cfg.DoubaoAPIURL != "" {
+				apiURL = cfg.DoubaoAPIURL
+			}
+			if cfg.DoubaoModel != "" {
+				modelName = cfg.DoubaoModel
+			}
+		default: // deepseek
+			if cfg.DeepSeekAPIKey != "" {
+				apiKey = cfg.DeepSeekAPIKey
+			}
+			if cfg.DeepSeekAPIURL != "" {
+				apiURL = cfg.DeepSeekAPIURL
+			}
+			if cfg.DeepSeekModel != "" {
+				modelName = cfg.DeepSeekModel
+			}
+			if cfg.DeepSeekMaxTokens > 0 {
+				maxTokens = cfg.DeepSeekMaxTokens
+			}
+			if cfg.DeepSeekReasoningEffort != "" {
+				reasoningEffort = cfg.DeepSeekReasoningEffort
+			}
 		}
 	}
 
-	if apiURL == "" {
-		apiURL = "https://api.deepseek.com/v1"
+	switch provider {
+	case "doubao":
+		if apiURL == "" {
+			apiURL = "https://ark.cn-beijing.volces.com/api/v3"
+		}
+		if modelName == "" {
+			modelName = "doubao-seed-1-6-250715"
+		}
+	default: // deepseek
+		if apiURL == "" {
+			apiURL = "https://api.deepseek.com/v1"
+		}
+		if modelName == "" {
+			modelName = "deepseek-chat"
+		}
 	}
-	if modelName == "" {
-		modelName = "deepseek-chat"
+
+	// reasoning_effort 只在 deepseek provider 时保留
+	if provider != "deepseek" {
+		reasoningEffort = ""
 	}
+
+	// thinking 参数：doubao 默认关闭深度思考
+	thinking := ""
+	if provider == "doubao" {
+		thinking = `{"type":"disabled"}`
+	}
+
+	// lite_tools：doubao 用精简工具摘要替代全量 schema
+	liteTools := false
+	if provider == "doubao" {
+		liteTools = true
+	}
+
+	log.Printf("[Gateway] provider=%s model=%s apiURL=%s maxTokens=%d reasoningEffort=%s liteTools=%v", provider, modelName, apiURL, maxTokens, reasoningEffort, liteTools)
 
 	model := &foundation.Model{
 		Name: modelName,
 		Options: map[string]interface{}{
-			"api_key":           apiKey,
-			"api_url":           apiURL,
-			"max_tokens":        maxTokens,
-			"reasoning_effort":  reasoningEffort,
+			"api_key":          apiKey,
+			"api_url":          apiURL,
+			"max_tokens":       maxTokens,
+			"reasoning_effort": reasoningEffort,
+			"thinking":         thinking,
+			"lite_tools":       liteTools,
 		},
 	}
-	log.Printf("[Gateway] model=%s apiURL=%s maxTokens=%d reasoningEffort=%s", modelName, apiURL, maxTokens, reasoningEffort)
-
-	// -------- 2) SQLite 仓库 + session.Manager --------
 	dbPath := os.Getenv("SESSION_DB")
 	if dbPath == "" {
 		_ = os.MkdirAll("data", 0o755)

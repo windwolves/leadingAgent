@@ -14,7 +14,7 @@ import (
 
 	"leadingAgent/agent/foundation"
 	"leadingAgent/agent/tools"
-	"leadingAgent/models/deepseek"
+	"leadingAgent/models/openai"
 )
 
 // StreamEvent types sent to the streaming callback.
@@ -95,6 +95,7 @@ func loadTools() []Tool {
 		tools.NewGrepSearchTool(),
 		tools.NewBingSearchTool(),
 		tools.NewRememberFactTool(),
+		tools.NewTopicFinderTool(),
 	}
 }
 
@@ -191,12 +192,12 @@ func (a *Agent) Summarize(ctx context.Context, model *foundation.Model, messages
 		modelName = "deepseek-chat"
 	}
 
-	client := deepseek.NewClient(apiKey, apiURL, modelName)
+	client := openai.NewClient(apiKey, apiURL, modelName)
 	summMsgs := []foundation.Message{
 		{Role: foundation.RoleSystem, Content: "你是一个精确、简洁的摘要生成器。"},
 		{Role: foundation.RoleUser, Content: sb.String()},
 	}
-	resp, err := client.Chat(deepseek.ConvertMessages(summMsgs), nil, 1000, "low")
+	resp, err := client.Chat(openai.ConvertMessages(summMsgs), nil, 100000, "low", nil)
 	if err != nil {
 		return "", fmt.Errorf("summary call failed: %w", err)
 	}
@@ -366,10 +367,26 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 		modelName = "deepseek-chat"
 	}
 
-	client := deepseek.NewClient(apiKey, apiURL, modelName)
+	client := openai.NewClient(apiKey, apiURL, modelName)
 
-	deepseekMessages := deepseek.ConvertMessages(messages)
-	toolDefs := a.buildToolDefinitions()
+	openaiMessages := openai.ConvertMessages(messages)
+
+	// 检查是否用精简工具模式（doubao 等对 context 敏感的模型）
+	liteTools := false
+	if v, ok := model.Options["lite_tools"].(bool); ok {
+		liteTools = v
+	}
+
+	var toolDefs []openai.ToolDef
+	if liteTools {
+		toolDefs = nil
+		// 在 system prompt 末尾追加工具摘要
+		if len(openaiMessages) > 0 && openaiMessages[0].Role == "system" {
+			openaiMessages[0].Content += a.buildToolSummary()
+		}
+	} else {
+		toolDefs = a.buildToolDefinitions()
+	}
 
 	maxTokens := 4096
 	if v, ok := model.Options["max_tokens"].(int); ok && v > 0 {
@@ -379,11 +396,16 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 	}
 
 	reasoningEffort := "low"
-	if v, ok := model.Options["reasoning_effort"].(string); ok && v != "" {
-		reasoningEffort = v
+	if v, ok := model.Options["reasoning_effort"].(string); ok {
+		reasoningEffort = v // 允许空字符串覆盖默认值（doubao 不传此参数）
 	}
 
-	resp, err := client.Chat(deepseekMessages, toolDefs, maxTokens, reasoningEffort)
+	var thinking json.RawMessage
+	if t, ok := model.Options["thinking"].(string); ok && t != "" {
+		thinking = json.RawMessage(t)
+	}
+
+	resp, err := client.Chat(openaiMessages, toolDefs, maxTokens, reasoningEffort, thinking)
 	if err != nil {
 		return nil, fmt.Errorf("DeepSeek API call failed: %w", err)
 	}
@@ -456,9 +478,21 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 		modelName = "deepseek-chat"
 	}
 
-	client := deepseek.NewClient(apiKey, apiURL, modelName)
-	deepseekMessages := deepseek.ConvertMessages(messages)
-	toolDefs := a.buildToolDefinitions()
+	client := openai.NewClient(apiKey, apiURL, modelName)
+	openaiMsgs := openai.ConvertMessages(messages)
+
+	// 检查是否用精简工具模式
+	var toolDefs []openai.ToolDef
+	if v, ok := model.Options["lite_tools"].(bool); ok && v {
+		toolDefs = nil
+		if len(openaiMsgs) > 0 && openaiMsgs[0].Role == "system" {
+			openaiMsgs[0].Content += a.buildToolSummary()
+		}
+		a.logger.Printf("[Agent] lite_tools mode: toolDefs=nil, systemPrompt=%d chars", len(openaiMsgs[0].Content))
+	} else {
+		toolDefs = a.buildToolDefinitions()
+		a.logger.Printf("[Agent] full tools mode: %d tool defs", len(toolDefs))
+	}
 
 	maxTokens := 4096
 	if v, ok := model.Options["max_tokens"].(int); ok && v > 0 {
@@ -468,8 +502,13 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 	}
 
 	reasoningEffort := "low"
-	if v, ok := model.Options["reasoning_effort"].(string); ok && v != "" {
+	if v, ok := model.Options["reasoning_effort"].(string); ok {
 		reasoningEffort = v
+	}
+
+	var thinkingStream json.RawMessage
+	if t, ok := model.Options["thinking"].(string); ok && t != "" {
+		thinkingStream = json.RawMessage(t)
 	}
 
 	var (
@@ -481,7 +520,7 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 	// DeepSeek streams tool_calls incrementally across chunks with the same index.
 	toolCallMap := make(map[int]*foundation.ToolUseContent) // index → partial tool call
 
-	err := client.StreamChat(deepseekMessages, toolDefs, maxTokens, reasoningEffort, func(streamResp *deepseek.StreamChatResponse) error {
+	err := client.StreamChat(openaiMsgs, toolDefs, maxTokens, reasoningEffort, thinkingStream, func(streamResp *openai.StreamChatResponse) error {
 		if len(streamResp.Choices) == 0 {
 			return nil
 		}
@@ -579,8 +618,8 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 	return &foundationMsg, nil
 }
 
-func (a *Agent) buildToolDefinitions() []deepseek.ToolDef {
-	defs := make([]deepseek.ToolDef, 0, len(a.tools))
+func (a *Agent) buildToolDefinitions() []openai.ToolDef {
+	defs := make([]openai.ToolDef, 0, len(a.tools))
 	for _, t := range a.tools {
 		schema := t.InputSchema()
 		if schema == nil {
@@ -591,9 +630,9 @@ func (a *Agent) buildToolDefinitions() []deepseek.ToolDef {
 			}
 		}
 
-		defs = append(defs, deepseek.ToolDef{
+		defs = append(defs, openai.ToolDef{
 			Type: "function",
-			Function: deepseek.ToolDefFunction{
+			Function: openai.ToolDefFunction{
 				Name:        t.Name(),
 				Description: t.Description(),
 				Parameters:  schema,
@@ -603,13 +642,25 @@ func (a *Agent) buildToolDefinitions() []deepseek.ToolDef {
 	return defs
 }
 
-// normalizeModelName 将任意大小写的模型名规范化为 DeepSeek API 接受的格式。
-// 接受的格式：deepseek-chat / deepseek-reasoner / deepseek-v4-flash / deepseek-v4-pro
-// 传入空字符串或无法识别的名称时返回空字符串（由调用方决定默认值）。
+// buildToolSummary 生成一行/工具的简洁摘要，用于 doubao 等对 context 敏感的模型。
+func (a *Agent) buildToolSummary() string {
+	var sb strings.Builder
+	sb.WriteString("\n\n## 可用工具清单\n")
+	for _, t := range a.tools {
+		sb.WriteString("- ")
+		sb.WriteString(t.Name())
+		sb.WriteString(": ")
+		sb.WriteString(t.Description())
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n当你需要使用工具时，请在回复开头用一行 `[TOOL: 工具名 | 参数...]` 标记，系统会在下一轮为你调用。")
+	return sb.String()
+}
+
+// normalizeModelName 将模型名规范化（全小写）。
+// DeepSeek 接受的格式：deepseek-chat / deepseek-reasoner / deepseek-v4-flash / deepseek-v4-pro
+// 豆包接受的格式：doubao-seed-1-6-250715 等
 func normalizeModelName(name string) string {
-	// DeepSeek 接受的合法模型名（全小写）。
-	// - deepseek-chat: 基础模型，无推理内容
-	// - deepseek-v4-flash / deepseek-v4-pro / deepseek-reasoner: 会生成 reasoning_content
 	trimmed := strings.ToLower(strings.TrimSpace(name))
 	return trimmed
 }

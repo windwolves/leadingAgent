@@ -6,7 +6,7 @@ import (
 
 	"leadingAgent/config"
 	"leadingAgent/models"
-	"leadingAgent/models/deepseek"
+	"leadingAgent/models/openai"
 	"leadingAgent/repository"
 	"leadingAgent/services"
 
@@ -14,14 +14,14 @@ import (
 )
 
 type LdAgentHandler struct {
-	client   *deepseek.Client
+	client   *openai.Client
 	costRepo repository.CostRepository
 	model    string
 	apiURL   string
 }
 
 func NewLdAgentHandler(cfg *config.Config) (*LdAgentHandler, error) {
-	client := deepseek.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekAPIURL, cfg.DeepSeekModel)
+	client := openai.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekAPIURL, cfg.DeepSeekModel)
 
 	costRepo, err := repository.NewCostRepository("cost.db")
 	if err != nil {
@@ -37,7 +37,7 @@ func NewLdAgentHandler(cfg *config.Config) (*LdAgentHandler, error) {
 }
 
 func (h *LdAgentHandler) Chat(ctx context.Context, request *services.ChatRequest) (*services.ChatResponse, error) {
-	messages := []deepseek.Message{
+	messages := []openai.Message{
 		{
 			Role:    "system",
 			Content: "You are a helpful assistant.",
@@ -48,7 +48,7 @@ func (h *LdAgentHandler) Chat(ctx context.Context, request *services.ChatRequest
 		},
 	}
 
-	resp, err := h.client.Chat(messages, nil, 4096, "low")
+	resp, err := h.client.Chat(messages, nil, 100000, "low", nil)
 	if err != nil {
 		return &services.ChatResponse{
 			Response: "",
@@ -100,7 +100,7 @@ func (h *LdAgentHandler) Chat(ctx context.Context, request *services.ChatRequest
 }
 
 func (h *LdAgentHandler) StreamChat(ctx context.Context, request *services.ChatRequest, sender func(*services.StreamChatResponse) error) error {
-	messages := []deepseek.Message{
+	messages := []openai.Message{
 		{
 			Role:    "system",
 			Content: "You are a helpful assistant.",
@@ -113,7 +113,7 @@ func (h *LdAgentHandler) StreamChat(ctx context.Context, request *services.ChatR
 
 	var promptTokens, completionTokens, totalTokens int
 
-	err := h.client.StreamChat(messages, nil, 4096, "low", func(streamResp *deepseek.StreamChatResponse) error {
+	err := h.client.StreamChat(messages, nil, 100000, "low", nil, func(streamResp *openai.StreamChatResponse) error {
 		isLast := false
 		content := ""
 
@@ -123,10 +123,10 @@ func (h *LdAgentHandler) StreamChat(ctx context.Context, request *services.ChatR
 			if reasoning != "" {
 				// 将推理内容通过 sender 发送为额外的 text delta
 				if rerr := sender(&services.StreamChatResponse{
-					Response: reasoning,
+					Response:  reasoning,
 					SessionId: request.SessionId,
-					IsLast:   false,
-					Success:  true,
+					IsLast:    false,
+					Success:   true,
 				}); rerr != nil {
 					return rerr
 				}

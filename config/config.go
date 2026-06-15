@@ -10,6 +10,10 @@ type Config struct {
 	DeepSeekModel           string `mapstructure:"DEEPSEEK_MODEL"`
 	DeepSeekMaxTokens       int    `mapstructure:"DEEPSEEK_MAX_TOKENS"`
 	DeepSeekReasoningEffort string `mapstructure:"DEEPSEEK_REASONING_EFFORT"`
+
+	DoubaoAPIKey string `mapstructure:"DOUBAO_API_KEY"`
+	DoubaoAPIURL string `mapstructure:"DOUBAO_API_URL"`
+	DoubaoModel  string `mapstructure:"DOUBAO_MODEL"`
 }
 
 func LoadConfig() (*Config, error) {
