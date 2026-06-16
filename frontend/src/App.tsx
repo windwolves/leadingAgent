@@ -34,6 +34,7 @@ function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string>('')
   const [messages, setMessages] = useState<Message[]>([])
+  const [inputValue, setInputValue] = useState<string>('')
   const [isLoading, setIsLoading] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const didInit = useRef(false)
@@ -133,6 +134,67 @@ function App() {
       clearTimeout(t)
     } catch {
       // ignore network errors; UI already reflects deletion
+    }
+  }
+
+  // 成对删除：
+  //   点击用户消息 → 删除该用户消息 + 紧随的 AI 回复；
+  //   点击 AI 回复  → 删除前一条用户消息 + 该 AI 回复；
+  //   并把用户消息的内容回填到输入框，方便用户重新编辑。
+  async function handleDeleteMessage(clickedIndex: number) {
+    if (!activeSessionId) return
+    if (clickedIndex < 0 || clickedIndex >= messages.length) return
+
+    const clicked = messages[clickedIndex]
+    let userIndex = -1
+    let assistantIndex = -1
+
+    if (clicked.role === 'user') {
+      userIndex = clickedIndex
+      // 查找下一条 AI 回复（中间可能有连续 user 消息，虽然这里通常是交替的，先取紧随其后的那条）
+      if (clickedIndex + 1 < messages.length && messages[clickedIndex + 1].role === 'assistant') {
+        assistantIndex = clickedIndex + 1
+      }
+    } else {
+      // 点击的是 assistant：找前一条 user 消息（通常就是前一条）
+      assistantIndex = clickedIndex
+      if (clickedIndex - 1 >= 0 && messages[clickedIndex - 1].role === 'user') {
+        userIndex = clickedIndex - 1
+      }
+    }
+
+    const indexesToDelete: number[] = []
+    if (userIndex >= 0) indexesToDelete.push(userIndex)
+    if (assistantIndex >= 0) indexesToDelete.push(assistantIndex)
+    if (indexesToDelete.length === 0) return
+
+    // 保存删除操作前的输入框内容，请求失败时恢复（而不是粗暴清空）
+    const originalInput = inputValue
+    const userQueryContent = userIndex >= 0 ? messages[userIndex].content : ''
+
+    // 1) 乐观更新前端 UI
+    const deleteSet = new Set(indexesToDelete)
+    setMessages((prev) => prev.filter((_, i) => !deleteSet.has(i)))
+
+    // 2) 把用户的 query 回填到输入框（以便用户重新编辑 / 再发送）
+    setInputValue(userQueryContent)
+
+    // 3) 向后端发批量删除
+    try {
+      const ctl = new AbortController()
+      const t = setTimeout(() => ctl.abort(), 5000)
+      await fetch('/api/sessions/messages', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: activeSessionId, userId, indexes: indexesToDelete }),
+        signal: ctl.signal,
+      })
+      clearTimeout(t)
+      await loadSessions()
+    } catch {
+      // 请求失败：恢复删除前输入框内容，重新拉取消息
+      setInputValue(originalInput)
+      await loadMessages(activeSessionId)
     }
   }
 
@@ -278,6 +340,7 @@ function App() {
 
       // 请求正常完成后立即清除 abortRef，避免下一次调用时误 abort 已完成的请求
       abortRef.current = null
+      setInputValue('')
       await loadSessions()
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -370,7 +433,13 @@ function App() {
               </p>
             </div>
           ) : (
-            messages.map((m) => <ChatMessage key={m.id} message={m} />)
+            messages.map((m, idx) => (
+              <ChatMessage
+                key={m.id}
+                message={m}
+                onDelete={activeSessionId ? () => handleDeleteMessage(idx) : undefined}
+              />
+            ))
           )}
           {isLoading && (
             <div className="flex justify-center">
@@ -381,7 +450,7 @@ function App() {
         </div>
 
         <footer className="bg-slate-900 border-t border-white/10 px-6 py-4">
-          <ChatInput onSend={handleSendMessage} disabled={isLoading} />
+          <ChatInput onSend={handleSendMessage} disabled={isLoading} value={inputValue} onValueChange={setInputValue} />
         </footer>
       </main>
     </div>

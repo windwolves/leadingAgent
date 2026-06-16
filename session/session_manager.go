@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"leadingAgent/agent/foundation"
+	"sort"
 	"sync"
 	"time"
 )
@@ -288,6 +289,51 @@ func (m *Manager) Delete(ctx context.Context, id, userID string) error {
 		}
 	}
 	return m.repo.Delete(ctx, id)
+}
+
+// DeleteMessages 按索引批量删除会话中的消息。
+// indexes 对应 Messages 数组的下标（从 0 开始），与前端 GET /api/sessions/messages 返回顺序一致。
+// 调用方无需关心顺序，内部会先对 indexes 去重、降序处理，保证删除后剩余消息下标不偏移。
+func (m *Manager) DeleteMessages(ctx context.Context, id, userID string, indexes []int) error {
+	if id == "" || len(indexes) == 0 {
+		return ErrInvalid
+	}
+	mu := m.lockFor(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	s, err := m.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if userID != "" && s.UserID != userID {
+		return ErrNotFound
+	}
+
+	// 去重 + 范围校验
+	seen := make(map[int]struct{}, len(indexes))
+	for _, idx := range indexes {
+		if idx < 0 || idx >= len(s.Messages) {
+			return ErrInvalid
+		}
+		seen[idx] = struct{}{}
+	}
+
+	// 降序删除，避免删除高索引不会影响低索引
+	unique := make([]int, 0, len(seen))
+	for idx := range seen {
+		unique = append(unique, idx)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(unique)))
+
+	for _, idx := range unique {
+		s.Messages = append(s.Messages[:idx], s.Messages[idx+1:]...)
+	}
+	s.UpdatedAt = time.Now().UTC()
+	s.ExpiresAt = s.UpdatedAt.Add(m.ttl)
+	s.Version++
+
+	return m.repo.Update(ctx, s)
 }
 
 // ListByUser 返回某用户的会话列表（最多 limit 条）。

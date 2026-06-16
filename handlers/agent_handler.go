@@ -153,17 +153,23 @@ func (h *AgentHandler) handleDeleteSession(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// HandleGetSessionMessages 处理 GET /api/sessions/messages。
+// HandleGetSessionMessages 处理 /api/sessions/messages（GET 列表 / DELETE 单条消息）。
 func (h *AgentHandler) HandleGetSessionMessages(w http.ResponseWriter, r *http.Request) {
 	setCORS(w)
 	if r.Method == http.MethodOptions {
 		return
 	}
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListMessages(w, r)
+	case http.MethodDelete:
+		h.handleDeleteMessage(w, r)
+	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
+}
 
+func (h *AgentHandler) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("sessionId")
 	userID := r.URL.Query().Get("userId")
 	if sessionID == "" {
@@ -183,6 +189,32 @@ func (h *AgentHandler) HandleGetSessionMessages(w http.ResponseWriter, r *http.R
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(msgs)
+}
+
+func (h *AgentHandler) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SessionId string `json:"sessionId"`
+		UserId    string `json:"userId"`
+		Indexes   []int  `json:"indexes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.SessionId == "" || len(body.Indexes) == 0 {
+		http.Error(w, "missing sessionId or indexes", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := h.sessSvc.DeleteMessages(ctx, body.SessionId, body.UserId, body.Indexes); err != nil {
+		h.logger.Printf("[AgentHandler] delete messages error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func truncate(s string, n int) string {

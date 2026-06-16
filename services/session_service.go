@@ -112,6 +112,12 @@ func (s *SessionService) DeleteSession(ctx context.Context, sessionID, userID st
 	return s.mgr.Delete(ctx, sessionID, userID)
 }
 
+// DeleteMessages 按索引批量删除会话中的消息。
+// 索引与 GetMessages 返回的数组下标一致（从 0 开始）。
+func (s *SessionService) DeleteMessages(ctx context.Context, sessionID, userID string, indexes []int) error {
+	return s.mgr.DeleteMessages(ctx, sessionID, userID, indexes)
+}
+
 // GetMessages 返回会话的历史消息列表。
 func (s *SessionService) GetMessages(ctx context.Context, sessionID, userID string) ([]MessageItem, error) {
 	sess, err := s.mgr.Get(ctx, sessionID, userID)
