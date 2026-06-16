@@ -37,6 +37,9 @@ function App() {
   const [inputValue, setInputValue] = useState<string>('')
   const [isLoading, setIsLoading] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // 标记是否应自动跟随滚动；用户滚走时置 false，滚回底部时恢复 true
+  const shouldAutoScrollRef = useRef(true)
   const didInit = useRef(false)
   const abortRef = useRef<AbortController | null>(null)
   const loadingRef = useRef(false)
@@ -52,9 +55,25 @@ function App() {
     })
   }, [])
 
+  // 智能自动滚动：用户未操作时跟随 streaming 底部，用户滚走后不再跟随
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isLoading])
+    if (shouldAutoScrollRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages])
+
+  // 监听用户滚动操作，判断是否还在底部附近（阈值 80px）
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = el
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 80
+      shouldAutoScrollRef.current = isNearBottom
+    }
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => el.removeEventListener('scroll', handleScroll)
+  }, [])
 
   // 组件卸载时取消正在进行的请求
   useEffect(() => {
@@ -202,6 +221,7 @@ function App() {
     // 用同步 ref 防重复提交，避免 React 状态更新的异步延迟问题
     if (!content.trim() || loadingRef.current) return
     loadingRef.current = true
+    shouldAutoScrollRef.current = true
 
     // 取消上一次未完成的流式请求
     if (abortRef.current) {
@@ -423,7 +443,7 @@ function App() {
           </p>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-slate-500">
               <div className="text-5xl mb-4">🤖</div>
