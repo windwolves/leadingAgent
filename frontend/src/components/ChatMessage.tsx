@@ -1,10 +1,14 @@
+import { useState } from 'react'
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
+  thinking?: string
   promptTokens?: number
   completionTokens?: number
   totalTokens?: number
+  timestamp?: number
 }
 
 interface ChatMessageProps {
@@ -12,14 +16,40 @@ interface ChatMessageProps {
   onDelete?: () => void
 }
 
+function formatTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function ThinkingBlock({ thinking }: { thinking: string }) {
+  const [expanded, setExpanded] = useState(true)
+  return (
+    <div className="max-w-[80%] mb-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-400 mb-1 select-none"
+      >
+        <span>{expanded ? '▾' : '▸'}</span>
+        <span>思考过程</span>
+      </button>
+      {expanded && (
+        <div className="border-l-2 border-slate-600 pl-3 text-[12px] text-slate-500 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">
+          {thinking}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ChatMessage({ message, onDelete }: ChatMessageProps) {
   const isUser = message.role === 'user'
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+      {!isUser && message.thinking && <ThinkingBlock thinking={message.thinking} />}
       <div className={`group relative max-w-[80%] px-4 py-3 rounded-2xl ${
-        isUser 
-          ? 'bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-br-md' 
+        isUser
+          ? 'bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-br-md'
           : 'bg-gray-800/80 text-gray-100 rounded-bl-md'
       }`}>
         <div className={`text-xs mb-1 ${isUser ? 'text-white/70' : 'text-gray-500'}`}>
@@ -50,6 +80,11 @@ function ChatMessage({ message, onDelete }: ChatMessageProps) {
           </button>
         )}
       </div>
+      {message.timestamp && (
+        <span className="mt-1 text-[11px] text-gray-600 select-none">
+          {formatTime(message.timestamp)}
+        </span>
+      )}
     </div>
   )
 }

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"leadingAgent/agent/foundation"
 	"leadingAgent/agent/tools"
 	"leadingAgent/models/openai"
@@ -21,21 +23,38 @@ import (
 const (
 	StreamEventThinking   = "thinking"
 	StreamEventTextDelta  = "text_delta"
+	StreamEventReasoning  = "reasoning"
 	StreamEventToolCall   = "tool_call"
 	StreamEventToolResult = "tool_result"
 	StreamEventDone       = "done"
 	StreamEventError      = "error"
+	StreamEventCritique   = "critique"
 )
+
+// maxCritiqueRetries caps how many times the critic can send the agent back
+// for another turn on the same final answer, preventing an infinite loop if
+// the critic and the model can't converge.
+const maxCritiqueRetries = 2
+
+// TokenUsage tracks cumulative token consumption for a single Agent session.
+type TokenUsage struct {
+	PromptTokens     int `json:"promptTokens"`
+	CompletionTokens int `json:"completionTokens"`
+	TotalTokens      int `json:"totalTokens"`
+}
 
 // StreamEvent represents a single streaming event.
 type StreamEvent struct {
 	Type      string                 `json:"type"`
 	Content   string                 `json:"content,omitempty"`
+	Reasoning string                 `json:"reasoning,omitempty"`
 	Tool      string                 `json:"tool,omitempty"`
 	Input     map[string]interface{} `json:"input,omitempty"`
 	Result    string                 `json:"result,omitempty"`
 	Turns     int                    `json:"turns,omitempty"`
 	SessionID string                 `json:"sessionId,omitempty"`
+	// Token counts populated on StreamEventDone; zero on all other events.
+	Usage *TokenUsage `json:"usage,omitempty"`
 }
 
 // StreamCallback is called for each streaming event.
@@ -53,6 +72,9 @@ type Agent struct {
 	modelCaller func(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error)
 	logger      *log.Logger
 	logFile     *os.File
+
+	usageMu sync.Mutex
+	usage   TokenUsage
 }
 
 func NewAgent() *Agent {
@@ -107,22 +129,48 @@ func (a *Agent) Close() error {
 	return nil
 }
 
+// accumulateUsage records token counts from one model call and logs them.
+func (a *Agent) accumulateUsage(caller, model string, prompt, completion int) {
+	a.usageMu.Lock()
+	a.usage.PromptTokens += prompt
+	a.usage.CompletionTokens += completion
+	a.usage.TotalTokens += prompt + completion
+	sessPrompt := a.usage.PromptTokens
+	sessCompl := a.usage.CompletionTokens
+	sessTotal := a.usage.TotalTokens
+	a.usageMu.Unlock()
+	a.logger.Printf("[Usage] %s model=%s prompt=%d completion=%d total=%d | session prompt=%d completion=%d total=%d",
+		caller, model, prompt, completion, prompt+completion,
+		sessPrompt, sessCompl, sessTotal)
+}
+
+// UsageSummary returns a snapshot of cumulative token usage for this session.
+func (a *Agent) UsageSummary() TokenUsage {
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	return a.usage
+}
+
 const defaultSystemPrompt = "You are a helpful assistant. When you need information, use the available tools to search or take action. When you learn personal facts about the user, use the remember_fact tool to save them."
 
-func (a *Agent) Execute(ctx context.Context, model *foundation.Model, systemPrompt string, history []foundation.Message, userQuery string) (string, error) {
+func (a *Agent) Execute(ctx context.Context, model *foundation.Model, systemPrompt string, history []foundation.Message, userQuery string) (string, string, error) {
 	a.logger.Printf("[Agent] Execute: query=%q model=%s history=%d", userQuery, model.Name, len(history))
 	messages := a.buildMessages(systemPrompt, history, userQuery)
 
+	critiqueAttempts := 0
 	for {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", "", ctx.Err()
 		default:
 		}
 
 		assistantMsg, err := a.think(ctx, model, messages)
 		if err != nil {
-			return "", err
+			return "", "", err
+		}
+		if assistantMsg == nil {
+			return "", "", fmt.Errorf("model returned nil response")
 		}
 
 		messages = append(messages, *assistantMsg)
@@ -131,10 +179,24 @@ func (a *Agent) Execute(ctx context.Context, model *foundation.Model, systemProm
 			a.logger.Printf("[Agent] Think → %d tool call(s): %v", len(assistantMsg.ToolCalls), toolCallNames(assistantMsg.ToolCalls))
 			toolMsgs := a.executeParallel(ctx, assistantMsg.ToolCalls)
 			messages = append(messages, toolMsgs...)
-		} else {
-			a.logger.Printf("[Agent] Final response: %s", assistantMsg.Content)
-			return assistantMsg.Content, nil
+			continue
 		}
+
+		if critiqueAttempts < maxCritiqueRetries {
+			verdict := a.reviewFinalAnswer(ctx, model, userQuery, assistantMsg.Content)
+			if !verdict.Approved {
+				critiqueAttempts++
+				a.logger.Printf("[Critic] rejected final answer (attempt %d/%d): %s", critiqueAttempts, maxCritiqueRetries, verdict.Feedback)
+				messages = append(messages, foundation.NewMessage(
+					foundation.RoleUser,
+					fmt.Sprintf("（评审反馈，请据此修正你的回答）%s", verdict.Feedback),
+				))
+				continue
+			}
+		}
+
+		a.logger.Printf("[Agent] Final response: %s", assistantMsg.Content)
+		return assistantMsg.Content, assistantMsg.Reasoning, nil
 	}
 }
 
@@ -194,8 +256,8 @@ func (a *Agent) Summarize(ctx context.Context, model *foundation.Model, messages
 
 	client := openai.NewClient(apiKey, apiURL, modelName)
 	summMsgs := []foundation.Message{
-		{Role: foundation.RoleSystem, Content: "你是一个精确、简洁的摘要生成器。"},
-		{Role: foundation.RoleUser, Content: sb.String()},
+		foundation.NewMessage(foundation.RoleSystem, "你是一个精确、简洁的摘要生成器。"),
+		foundation.NewMessage(foundation.RoleUser, sb.String()),
 	}
 	resp, err := client.Chat(openai.ConvertMessages(summMsgs), nil, 100000, "low", nil)
 	if err != nil {
@@ -218,6 +280,7 @@ func (a *Agent) ExecuteStreaming(ctx context.Context, model *foundation.Model, s
 	messages := a.buildMessages(systemPrompt, history, userQuery)
 
 	turn := 0
+	critiqueAttempts := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -230,6 +293,11 @@ func (a *Agent) ExecuteStreaming(ctx context.Context, model *foundation.Model, s
 
 		assistantMsg, err := a.thinkStreaming(ctx, model, messages, onEvent, turn)
 		if err != nil {
+			onEvent(StreamEvent{Type: StreamEventError, Content: err.Error()})
+			return err
+		}
+		if assistantMsg == nil {
+			err := fmt.Errorf("model returned nil response")
 			onEvent(StreamEvent{Type: StreamEventError, Content: err.Error()})
 			return err
 		}
@@ -254,11 +322,27 @@ func (a *Agent) ExecuteStreaming(ctx context.Context, model *foundation.Model, s
 				})
 			}
 			messages = append(messages, toolMsgs...)
-		} else {
-			a.logger.Printf("[Agent] Final response: %s", assistantMsg.Content)
-			onEvent(StreamEvent{Type: StreamEventDone, Content: assistantMsg.Content, Turns: turn})
-			return nil
+			continue
 		}
+
+		if critiqueAttempts < maxCritiqueRetries {
+			verdict := a.reviewFinalAnswer(ctx, model, userQuery, assistantMsg.Content)
+			if !verdict.Approved {
+				critiqueAttempts++
+				a.logger.Printf("[Critic] rejected final answer (attempt %d/%d): %s", critiqueAttempts, maxCritiqueRetries, verdict.Feedback)
+				onEvent(StreamEvent{Type: StreamEventCritique, Content: verdict.Feedback, Turns: turn})
+				messages = append(messages, foundation.NewMessage(
+					foundation.RoleUser,
+					fmt.Sprintf("（评审反馈，请据此修正你的回答）%s", verdict.Feedback),
+				))
+				continue
+			}
+		}
+
+		a.logger.Printf("[Agent] Final response: %s", assistantMsg.Content)
+		summary := a.UsageSummary()
+		onEvent(StreamEvent{Type: StreamEventDone, Content: assistantMsg.Content, Reasoning: assistantMsg.Reasoning, Turns: turn, Usage: &summary})
+		return nil
 	}
 }
 
@@ -268,10 +352,10 @@ func (a *Agent) buildMessages(systemPrompt string, history []foundation.Message,
 		systemPrompt = defaultSystemPrompt
 	}
 	out := make([]foundation.Message, 0, len(history)+2)
-	out = append(out, foundation.Message{Role: foundation.RoleSystem, Content: systemPrompt})
+	out = append(out, foundation.NewMessage(foundation.RoleSystem, systemPrompt))
 	out = append(out, history...)
 	if userQuery != "" {
-		out = append(out, foundation.Message{Role: foundation.RoleUser, Content: userQuery})
+		out = append(out, foundation.NewMessage(foundation.RoleUser, userQuery))
 	}
 	return out
 }
@@ -322,7 +406,9 @@ func (a *Agent) executeParallel(ctx context.Context, toolCalls []foundation.Tool
 		}
 
 		msgs = append(msgs, foundation.Message{
-			Role: foundation.RoleTool,
+			ID:        uuid.NewString(),
+			Role:      foundation.RoleTool,
+			CreatedAt: time.Now().UTC(),
 			ToolResult: &foundation.ToolResultContent{
 				Type:      "tool_result",
 				ToolUseID: tc.ID,
@@ -341,7 +427,10 @@ func toolCallNames(calls []foundation.ToolUseContent) []string {
 	return names
 }
 
-func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
+// resolveClient builds an OpenAI-compatible client from the model's options,
+// falling back to DeepSeek env vars. Shared by callModel, callModelStreaming,
+// and the critic's review call so all three resolve credentials identically.
+func (a *Agent) resolveClient(model *foundation.Model) *openai.Client {
 	apiKey := ""
 	apiURL := "https://api.deepseek.com/v1"
 
@@ -367,7 +456,11 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 		modelName = "deepseek-chat"
 	}
 
-	client := openai.NewClient(apiKey, apiURL, modelName)
+	return openai.NewClient(apiKey, apiURL, modelName)
+}
+
+func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages []foundation.Message) (*foundation.Message, error) {
+	client := a.resolveClient(model)
 
 	openaiMessages := openai.ConvertMessages(messages)
 
@@ -415,17 +508,13 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 	}
 
 	choice := resp.Choices[0]
+	now := time.Now().UTC()
 	foundationMsg := &foundation.Message{
-		Role: foundation.RoleAssistant,
-	}
-	if choice.Message.ReasoningContent != "" {
-		// V4 模型的推理内容放在 content 前，方便前端/下游处理
-		foundationMsg.Content = choice.Message.ReasoningContent
-		if choice.Message.Content != "" {
-			foundationMsg.Content = choice.Message.ReasoningContent + "\n\n" + choice.Message.Content
-		}
-	} else {
-		foundationMsg.Content = choice.Message.Content
+		ID:        uuid.NewString(),
+		Role:      foundation.RoleAssistant,
+		CreatedAt: now,
+		Content:   choice.Message.Content,
+		Reasoning: choice.Message.ReasoningContent,
 	}
 
 	if len(choice.Message.ToolCalls) > 0 {
@@ -444,41 +533,14 @@ func (a *Agent) callModel(ctx context.Context, model *foundation.Model, messages
 	}
 
 	if resp.Usage.TotalTokens > 0 {
-		a.logger.Printf("[DeepSeek] model=%s tokens: prompt=%d completion=%d total=%d",
-			resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+		a.accumulateUsage("callModel", resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 
 	return foundationMsg, nil
 }
 
 func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model, messages []foundation.Message, onEvent StreamCallback) (*foundation.Message, error) {
-	apiKey := ""
-	apiURL := "https://api.deepseek.com/v1"
-
-	if key, ok := model.Options["api_key"].(string); ok && key != "" {
-		apiKey = key
-	}
-	if url, ok := model.Options["api_url"].(string); ok && url != "" {
-		apiURL = url
-	}
-	if apiKey == "" {
-		apiKey = os.Getenv("DEEPSEEK_API_KEY")
-	}
-	if envURL := os.Getenv("DEEPSEEK_API_URL"); envURL != "" {
-		apiURL = envURL
-	}
-
-	modelName := model.Name
-	if modelName == "" {
-		modelName = os.Getenv("DEEPSEEK_MODEL")
-	}
-	// DeepSeek API 只接受小写的模型名。常见的有效名称：deepseek-chat / deepseek-reasoner / deepseek-v4-flash / deepseek-v4-pro
-	modelName = normalizeModelName(modelName)
-	if modelName == "" {
-		modelName = "deepseek-chat"
-	}
-
-	client := openai.NewClient(apiKey, apiURL, modelName)
+	client := a.resolveClient(model)
 	openaiMsgs := openai.ConvertMessages(messages)
 
 	// 检查是否用精简工具模式
@@ -512,8 +574,17 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 	}
 
 	var (
-		fullContent   strings.Builder
-		foundationMsg = foundation.Message{Role: foundation.RoleAssistant}
+		fullContent     strings.Builder
+		reasoningBuffer strings.Builder
+		now             = time.Now().UTC()
+		foundationMsg   = foundation.Message{
+			ID:        uuid.NewString(),
+			Role:      foundation.RoleAssistant,
+			CreatedAt: now,
+		}
+		streamModel  string
+		streamPrompt int
+		streamCompl  int
 	)
 
 	// Accumulate tool calls from streaming chunks.
@@ -521,16 +592,23 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 	toolCallMap := make(map[int]*foundation.ToolUseContent) // index → partial tool call
 
 	err := client.StreamChat(openaiMsgs, toolDefs, maxTokens, reasoningEffort, thinkingStream, func(streamResp *openai.StreamChatResponse) error {
+		if streamResp.Model != "" {
+			streamModel = streamResp.Model
+		}
+		if streamResp.Usage != nil {
+			streamPrompt = streamResp.Usage.PromptTokens
+			streamCompl = streamResp.Usage.CompletionTokens
+		}
 		if len(streamResp.Choices) == 0 {
 			return nil
 		}
 
 		delta := streamResp.Choices[0].Delta
 
-		// Stream reasoning content (V4 / reasoner models)
+		// Stream reasoning content (V4 / reasoner models) as a separate event
 		if delta.ReasoningContent != "" {
-			fullContent.WriteString(delta.ReasoningContent)
-			onEvent(StreamEvent{Type: StreamEventTextDelta, Content: delta.ReasoningContent})
+			reasoningBuffer.WriteString(delta.ReasoningContent)
+			onEvent(StreamEvent{Type: StreamEventReasoning, Content: delta.ReasoningContent})
 		}
 
 		// Stream text deltas
@@ -583,7 +661,12 @@ func (a *Agent) callModelStreaming(ctx context.Context, model *foundation.Model,
 		return nil, fmt.Errorf("DeepSeek streaming API call failed: %w", err)
 	}
 
+	if streamPrompt > 0 || streamCompl > 0 {
+		a.accumulateUsage("callModelStreaming", streamModel, streamPrompt, streamCompl)
+	}
+
 	foundationMsg.Content = fullContent.String()
+	foundationMsg.Reasoning = reasoningBuffer.String()
 
 	// Parse accumulated tool calls
 	for i := 0; ; i++ {

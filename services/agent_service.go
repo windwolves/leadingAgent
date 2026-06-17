@@ -73,9 +73,13 @@ func (s *AgentService) StreamChat(ctx context.Context, sessionID, userID, messag
 	}
 
 	var assistantContent string
+	var assistantReasoning string
 	wrap := func(event agent.StreamEvent) error {
 		if event.Type == agent.StreamEventTextDelta {
 			assistantContent += event.Content
+		}
+		if event.Type == agent.StreamEventReasoning {
+			assistantReasoning += event.Content
 		}
 		if event.Type == agent.StreamEventDone {
 			if sessionID != updated.ID {
@@ -101,7 +105,7 @@ func (s *AgentService) StreamChat(ctx context.Context, sessionID, userID, messag
 		return err
 	}
 
-	if err := s.sessions.AppendAssistantMessage(ctx, updated.ID, userID, assistantContent); err != nil {
+	if err := s.sessions.AppendAssistantMessage(ctx, updated.ID, userID, assistantContent, assistantReasoning); err != nil {
 		s.logger.Printf("[AgentService] AppendAssistantMessage failed: %v", err)
 	}
 	return nil
@@ -146,15 +150,15 @@ func (s *AgentService) Chat(ctx context.Context, sessionID, userID, message stri
 		history = updated.Messages[:n-1]
 	}
 
-	resp, runErr := s.agent.Execute(ctx, s.model, prompt, history, message)
+	respContent, respReasoning, runErr := s.agent.Execute(ctx, s.model, prompt, history, message)
 	if runErr != nil {
 		s.sessions.RecordError(ctx, updated.ID, userID, 3)
 		return nil, runErr
 	}
 
-	if err := s.sessions.AppendAssistantMessage(ctx, updated.ID, userID, resp); err != nil {
+	if err := s.sessions.AppendAssistantMessage(ctx, updated.ID, userID, respContent, respReasoning); err != nil {
 		s.logger.Printf("[AgentService] AppendAssistantMessage failed: %v", err)
 	}
 
-	return &ChatResult{Response: resp, SessionID: updated.ID}, nil
+	return &ChatResult{Response: respContent, SessionID: updated.ID}, nil
 }

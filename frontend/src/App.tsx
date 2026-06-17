@@ -8,6 +8,11 @@ interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
+  thinking?: string
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens?: number
+  timestamp?: number
 }
 
 interface SessionSummary {
@@ -21,12 +26,13 @@ interface SessionSummary {
 
 // Matches agent.StreamEvent from the backend
 interface StreamEvent {
-  type: 'thinking' | 'text_delta' | 'tool_call' | 'tool_result' | 'done' | 'error'
+  type: 'thinking' | 'reasoning' | 'text_delta' | 'tool_call' | 'tool_result' | 'done' | 'error'
   content?: string
   tool?: string
   input?: Record<string, unknown>
   result?: string
   turns?: number
+  usage?: { promptTokens: number; completionTokens: number; totalTokens: number }
 }
 
 function App() {
@@ -110,10 +116,12 @@ function App() {
         return
       }
       const data = await res.json()
-      const out: Message[] = (data || []).map((m: { role: string; content: string }, i: number) => ({
-        id: `m-${sessionId}-${i}`,
+      const out: Message[] = (data || []).map((m: { id: string; role: string; content: string; created_at?: string; reasoning?: string }, i: number) => ({
+        id: m.id || `m-${sessionId}-${i}`,
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.content ?? '',
+        thinking: m.reasoning || undefined,
+        timestamp: m.created_at ? new Date(m.created_at).getTime() : undefined,
       }))
       setMessages(out)
     } catch {
@@ -231,16 +239,20 @@ function App() {
     const abortController = new AbortController()
     abortRef.current = abortController
 
+    const now = Date.now()
     const userMessage: Message = {
-      id: `u-${Date.now()}`,
+      id: `u-${now}`,
       role: 'user',
       content: content.trim(),
+      timestamp: now,
     }
     setMessages((prev) => [...prev, userMessage])
     setIsLoading(true)
 
-    const assistantId = `a-${Date.now()}`
+    const assistantId = `a-${now}`
+    const assistantTimestamp = Date.now()
     let accumulatedContent = ''
+    let accumulatedThinking = ''
 
     const sessionIdToSend = activeSessionId
 
@@ -295,11 +307,22 @@ function App() {
                     ...prev,
                     {
                       id: assistantId,
-                      role: 'assistant',
+                      role: 'assistant' as const,
                       content: '思考中...' + (evt.turns ? ` (第${evt.turns}轮)` : ''),
+                      timestamp: assistantTimestamp,
                     },
                   ]
                 })
+                break
+              case 'reasoning':
+                if (evt.content) {
+                  accumulatedThinking += evt.content
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantId ? { ...m, thinking: accumulatedThinking } : m,
+                    ),
+                  )
+                }
                 break
               case 'text_delta':
                 if (evt.content) {
@@ -322,16 +345,27 @@ function App() {
                   )
                 }
                 break
-              case 'done':
+              case 'done': {
                 const finalText = evt.content && evt.content.trim() !== '' ? evt.content : accumulatedContent
                 if (finalText && finalText.trim() !== '') {
                   setMessages((prev) =>
                     prev.map((m) =>
-                      m.id === assistantId ? { ...m, content: finalText } : m,
+                      m.id === assistantId
+                        ? {
+                            ...m,
+                            content: finalText,
+                            ...(evt.usage && {
+                              promptTokens: evt.usage.promptTokens,
+                              completionTokens: evt.usage.completionTokens,
+                              totalTokens: evt.usage.totalTokens,
+                            }),
+                          }
+                        : m,
                     ),
                   )
                 }
                 break
+              }
               case 'error':
                 setMessages((prev) =>
                   prev.map((m) =>
@@ -368,7 +402,7 @@ function App() {
         return
       }
       const errMsg = error instanceof Error ? error.message : '网络错误'
-      setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: errMsg }])
+      setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: errMsg, timestamp: assistantTimestamp }])
     } finally {
       abortRef.current = null
       loadingRef.current = false

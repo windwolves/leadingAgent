@@ -1,5 +1,11 @@
 package foundation
 
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
 type Role string
 
 const (
@@ -10,10 +16,34 @@ const (
 )
 
 type Message struct {
+	ID         string             `json:"id"`
 	Role       Role               `json:"role"`
 	Content    string             `json:"content,omitempty"`
+	Reasoning  string             `json:"reasoning,omitempty"`
 	ToolCalls  []ToolUseContent   `json:"tool_calls,omitempty"`
 	ToolResult *ToolResultContent `json:"tool_result,omitempty"`
+	CreatedAt  time.Time          `json:"created_at"`
+}
+
+// NewMessage creates a simple message with auto-generated ID and timestamp.
+func NewMessage(role Role, content string) Message {
+	return Message{
+		ID:        uuid.NewString(),
+		Role:      role,
+		Content:   content,
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+// NewMessageWithToolCalls creates a message with tool calls (auto ID + timestamp).
+func NewMessageWithToolCalls(role Role, content string, toolCalls []ToolUseContent) Message {
+	return Message{
+		ID:        uuid.NewString(),
+		Role:      role,
+		Content:   content,
+		ToolCalls: toolCalls,
+		CreatedAt: time.Now().UTC(),
+	}
 }
 
 type SystemMessage struct {

@@ -20,8 +20,11 @@ type SessionSummary struct {
 
 // MessageItem 历史消息条目（对外展示用）。
 type MessageItem struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	ID        string `json:"id"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Reasoning string `json:"reasoning,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // SessionService 封装会话生命周期管理，对上层屏蔽 session.Manager 和存储细节。
@@ -59,16 +62,19 @@ func (s *SessionService) GetSessionMessages(ctx context.Context, sessionID, user
 
 // AppendUserMessage 追加用户消息并返回更新后的 Session。
 func (s *SessionService) AppendUserMessage(ctx context.Context, id, userID, content string) (*session.Session, error) {
-	msg := foundation.Message{Role: foundation.RoleUser, Content: content}
+	msg := foundation.NewMessage(foundation.RoleUser, content)
 	return s.mgr.Append(ctx, id, userID, msg)
 }
 
 // AppendAssistantMessage 追加 assistant 消息（仅落盘，不返回 Session）。
-func (s *SessionService) AppendAssistantMessage(ctx context.Context, id, userID, content string) error {
+func (s *SessionService) AppendAssistantMessage(ctx context.Context, id, userID, content, reasoning string) error {
 	if content == "" {
 		return nil
 	}
-	msg := foundation.Message{Role: foundation.RoleAssistant, Content: content}
+	msg := foundation.NewMessage(foundation.RoleAssistant, content)
+	if reasoning != "" {
+		msg.Reasoning = reasoning
+	}
 	_, err := s.mgr.Append(ctx, id, userID, msg)
 	return err
 }
@@ -126,9 +132,16 @@ func (s *SessionService) GetMessages(ctx context.Context, sessionID, userID stri
 	}
 	out := make([]MessageItem, 0, len(sess.Messages))
 	for _, m := range sess.Messages {
+		createdAt := ""
+		if !m.CreatedAt.IsZero() {
+			createdAt = m.CreatedAt.Format(time.RFC3339)
+		}
 		out = append(out, MessageItem{
-			Role:    string(m.Role),
-			Content: m.Content,
+			ID:        m.ID,
+			Role:      string(m.Role),
+			Content:   m.Content,
+			Reasoning: m.Reasoning,
+			CreatedAt: createdAt,
 		})
 	}
 	return out, nil

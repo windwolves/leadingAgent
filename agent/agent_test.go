@@ -89,7 +89,7 @@ func TestExecute_ReActWithReadFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "", nil, "read my test file")
+	resp, _, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "", nil, "read my test file")
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestExecute_ReActWithBash(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "", nil, "run echo command")
+	resp, _, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "", nil, "run echo command")
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestExecute_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "", nil, "test query")
+	_, _, err := agent.Execute(ctx, &foundation.Model{Name: "deepseek-chat"}, "", nil, "test query")
 
 	if err == nil {
 		t.Fatal("expected context canceled error")
