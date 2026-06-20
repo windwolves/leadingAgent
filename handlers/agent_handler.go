@@ -94,7 +94,7 @@ func (h *AgentHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleCosts 处理 GET /api/costs，返回所有 token 消耗记录。
+// HandleCosts 处理 GET /api/costs?userId=<id>，返回该用户的 token 消耗记录。
 func (h *AgentHandler) HandleCosts(w http.ResponseWriter, r *http.Request) {
 	setCORS(w)
 	if r.Method == http.MethodOptions {
@@ -102,6 +102,12 @@ func (h *AgentHandler) HandleCosts(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID := r.URL.Query().Get("userId")
+	if userID == "" {
+		http.Error(w, "missing userId", http.StatusBadRequest)
 		return
 	}
 

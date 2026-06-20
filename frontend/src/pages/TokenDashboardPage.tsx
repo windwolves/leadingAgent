@@ -60,7 +60,7 @@ export default function TokenDashboardPage() {
   const [activeTab, setActiveTab] = useState<DetailTab>('session')
 
   useEffect(() => {
-    fetch('/api/costs')
+    fetch('/api/costs?userId=leading')
       .then((r) => r.json())
       .then((d) => setCosts(d.costs ?? []))
       .catch(() => setCosts([]))

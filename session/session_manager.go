@@ -367,6 +367,7 @@ func (m *Manager) RecordError(ctx context.Context, id, userID string, threshold 
 }
 
 // UpdateTokenUsage 原子更新 session 的 TokenUsage 字段。
+// 调用方必须传入累计值（整个 session 的总量），而非单次调用的增量。
 func (m *Manager) UpdateTokenUsage(ctx context.Context, id, userID string, prompt, completion, total int32) error {
 	if id == "" {
 		return ErrInvalid

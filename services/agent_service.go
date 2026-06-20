@@ -2,11 +2,11 @@ package services
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"leadingAgent/agent"
 	"leadingAgent/agent/foundation"
 	"leadingAgent/models"
@@ -44,6 +44,28 @@ func NewAgentService(a *agent.Agent, m *foundation.Model, ss *SessionService, ms
 func (s *AgentService) WithCostRepo(r interface{ Save(*models.TokenCost) error }) *AgentService {
 	s.costRepo = r
 	return s
+}
+
+// injectCostTracking 在每次请求前将 sessionID 和 CostSaver 注入 Agent。
+func (s *AgentService) injectCostTracking(sessionID string) {
+	s.agent.SetSessionID(sessionID)
+	if s.costRepo == nil {
+		return
+	}
+	costRepo := s.costRepo
+	s.agent.WithCostSaver(func(caller, model, sid string, promptToks, completionToks int) {
+		_ = costRepo.Save(&models.TokenCost{
+			ID:               uuid.NewString(),
+			SessionID:        sid,
+			Provider:         providerFromModel(model),
+			Model:            model,
+			RequestType:      caller,
+			PromptTokens:     promptToks,
+			CompletionTokens: completionToks,
+			TotalTokens:      promptToks + completionToks,
+			CreatedAt:        time.Now(),
+		})
+	})
 }
 
 // providerFromModel 根据模型名称推断 provider。
@@ -96,23 +118,7 @@ func (s *AgentService) StreamChat(ctx context.Context, sessionID, userID, messag
 	}
 
 	// 3) 注入 session ID 和 cost saver
-	s.agent.SetSessionID(updated.ID)
-	if s.costRepo != nil {
-		costRepo := s.costRepo
-		s.agent.WithCostSaver(func(caller, model, sessionID string, promptToks, completionToks int) {
-			_ = costRepo.Save(&models.TokenCost{
-				ID:               fmt.Sprintf("%d", time.Now().UnixNano()),
-				SessionID:        sessionID,
-				Provider:         providerFromModel(model),
-				Model:            model,
-				RequestType:      caller,
-				PromptTokens:     promptToks,
-				CompletionTokens: completionToks,
-				TotalTokens:      promptToks + completionToks,
-				CreatedAt:        time.Now(),
-			})
-		})
-	}
+	s.injectCostTracking(updated.ID)
 
 	var assistantContent string
 	var assistantReasoning string
@@ -192,23 +198,7 @@ func (s *AgentService) Chat(ctx context.Context, sessionID, userID, message stri
 	}
 
 	// 注入 session ID 和 cost saver
-	s.agent.SetSessionID(updated.ID)
-	if s.costRepo != nil {
-		costRepo := s.costRepo
-		s.agent.WithCostSaver(func(caller, model, sessionID string, promptToks, completionToks int) {
-			_ = costRepo.Save(&models.TokenCost{
-				ID:               fmt.Sprintf("%d", time.Now().UnixNano()),
-				SessionID:        sessionID,
-				Provider:         providerFromModel(model),
-				Model:            model,
-				RequestType:      caller,
-				PromptTokens:     promptToks,
-				CompletionTokens: completionToks,
-				TotalTokens:      promptToks + completionToks,
-				CreatedAt:        time.Now(),
-			})
-		})
-	}
+	s.injectCostTracking(updated.ID)
 
 	var history []foundation.Message
 	if n := len(updated.Messages); n > 1 {
