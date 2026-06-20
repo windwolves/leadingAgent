@@ -60,6 +60,9 @@ type StreamEvent struct {
 // StreamCallback is called for each streaming event.
 type StreamCallback func(event StreamEvent) error
 
+// CostSaver is a callback invoked after each model call to persist token usage.
+type CostSaver func(caller, model, sessionID string, prompt, completion int)
+
 type Tool interface {
 	Name() string
 	Description() string
@@ -73,8 +76,10 @@ type Agent struct {
 	logger      *log.Logger
 	logFile     *os.File
 
-	usageMu sync.Mutex
-	usage   TokenUsage
+	usageMu   sync.Mutex
+	usage     TokenUsage
+	saveCost  CostSaver
+	sessionID string
 }
 
 func NewAgent() *Agent {
@@ -129,6 +134,17 @@ func (a *Agent) Close() error {
 	return nil
 }
 
+// WithCostSaver sets the cost saver callback and returns the agent for chaining.
+func (a *Agent) WithCostSaver(fn CostSaver) *Agent {
+	a.saveCost = fn
+	return a
+}
+
+// SetSessionID sets the session ID used when persisting cost records.
+func (a *Agent) SetSessionID(id string) {
+	a.sessionID = id
+}
+
 // accumulateUsage records token counts from one model call and logs them.
 func (a *Agent) accumulateUsage(caller, model string, prompt, completion int) {
 	a.usageMu.Lock()
@@ -138,10 +154,15 @@ func (a *Agent) accumulateUsage(caller, model string, prompt, completion int) {
 	sessPrompt := a.usage.PromptTokens
 	sessCompl := a.usage.CompletionTokens
 	sessTotal := a.usage.TotalTokens
+	saveCost := a.saveCost
+	sessionID := a.sessionID
 	a.usageMu.Unlock()
 	a.logger.Printf("[Usage] %s model=%s prompt=%d completion=%d total=%d | session prompt=%d completion=%d total=%d",
 		caller, model, prompt, completion, prompt+completion,
 		sessPrompt, sessCompl, sessTotal)
+	if saveCost != nil {
+		go saveCost(caller, model, sessionID, prompt, completion)
+	}
 }
 
 // UsageSummary returns a snapshot of cumulative token usage for this session.

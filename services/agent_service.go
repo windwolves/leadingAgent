@@ -2,10 +2,14 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strings"
+	"time"
 
 	"leadingAgent/agent"
 	"leadingAgent/agent/foundation"
+	"leadingAgent/models"
 )
 
 // ChatResult 非流式对话的返回结果。
@@ -21,6 +25,7 @@ type AgentService struct {
 	model    *foundation.Model
 	sessions *SessionService
 	memories *MemoryService
+	costRepo interface{ Save(*models.TokenCost) error }
 	logger   *log.Logger
 }
 
@@ -35,6 +40,24 @@ func NewAgentService(a *agent.Agent, m *foundation.Model, ss *SessionService, ms
 	}
 }
 
+// WithCostRepo 注入 cost repository，返回 self 以支持链式调用。
+func (s *AgentService) WithCostRepo(r interface{ Save(*models.TokenCost) error }) *AgentService {
+	s.costRepo = r
+	return s
+}
+
+// providerFromModel 根据模型名称推断 provider。
+func providerFromModel(model string) string {
+	lower := strings.ToLower(model)
+	if strings.Contains(lower, "deepseek") {
+		return "deepseek"
+	}
+	if strings.Contains(lower, "doubao") {
+		return "doubao"
+	}
+	return "unknown"
+}
+
 // StreamChat 流式对话，包含 session 生命周期管理 + Agent 执行。
 // onEvent 由上层（handler）提供，负责将 StreamEvent 写入具体传输协议（如 SSE）。
 func (s *AgentService) StreamChat(ctx context.Context, sessionID, userID, message string, onEvent agent.StreamCallback) error {
@@ -43,7 +66,7 @@ func (s *AgentService) StreamChat(ctx context.Context, sessionID, userID, messag
 		return err
 	}
 
-	// 1) 摘要注入：当新 session 替换了已过期的旧 session 时，用 LLM 生成旧对话摘要，注入 system prompt。
+	// 1) 摘要注入：当新 session 替换了已经过期的旧 session 时，用 LLM 生成旧对话摘要，注入 system prompt。
 	// 这一步是 "best effort" — 摘要生成失败不阻塞主对话。
 	prompt := sess.SystemPrompt
 	if sess.MetaData != nil {
@@ -72,6 +95,25 @@ func (s *AgentService) StreamChat(ctx context.Context, sessionID, userID, messag
 		}
 	}
 
+	// 3) 注入 session ID 和 cost saver
+	s.agent.SetSessionID(updated.ID)
+	if s.costRepo != nil {
+		costRepo := s.costRepo
+		s.agent.WithCostSaver(func(caller, model, sessionID string, promptToks, completionToks int) {
+			_ = costRepo.Save(&models.TokenCost{
+				ID:               fmt.Sprintf("%d", time.Now().UnixNano()),
+				SessionID:        sessionID,
+				Provider:         providerFromModel(model),
+				Model:            model,
+				RequestType:      caller,
+				PromptTokens:     promptToks,
+				CompletionTokens: completionToks,
+				TotalTokens:      promptToks + completionToks,
+				CreatedAt:        time.Now(),
+			})
+		})
+	}
+
 	var assistantContent string
 	var assistantReasoning string
 	wrap := func(event agent.StreamEvent) error {
@@ -87,6 +129,10 @@ func (s *AgentService) StreamChat(ctx context.Context, sessionID, userID, messag
 			}
 			if event.Content == "" {
 				event.Content = assistantContent
+			}
+			// Write back token usage to session
+			if event.Usage != nil {
+				_ = s.sessions.UpdateTokenUsage(ctx, updated.ID, userID, event.Usage.PromptTokens, event.Usage.CompletionTokens, event.Usage.TotalTokens)
 			}
 		}
 		if onEvent != nil {
@@ -145,6 +191,25 @@ func (s *AgentService) Chat(ctx context.Context, sessionID, userID, message stri
 		}
 	}
 
+	// 注入 session ID 和 cost saver
+	s.agent.SetSessionID(updated.ID)
+	if s.costRepo != nil {
+		costRepo := s.costRepo
+		s.agent.WithCostSaver(func(caller, model, sessionID string, promptToks, completionToks int) {
+			_ = costRepo.Save(&models.TokenCost{
+				ID:               fmt.Sprintf("%d", time.Now().UnixNano()),
+				SessionID:        sessionID,
+				Provider:         providerFromModel(model),
+				Model:            model,
+				RequestType:      caller,
+				PromptTokens:     promptToks,
+				CompletionTokens: completionToks,
+				TotalTokens:      promptToks + completionToks,
+				CreatedAt:        time.Now(),
+			})
+		})
+	}
+
 	var history []foundation.Message
 	if n := len(updated.Messages); n > 1 {
 		history = updated.Messages[:n-1]
@@ -155,6 +220,10 @@ func (s *AgentService) Chat(ctx context.Context, sessionID, userID, message stri
 		s.sessions.RecordError(ctx, updated.ID, userID, 3)
 		return nil, runErr
 	}
+
+	// Write back token usage to session
+	usage := s.agent.UsageSummary()
+	_ = s.sessions.UpdateTokenUsage(ctx, updated.ID, userID, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 
 	if err := s.sessions.AppendAssistantMessage(ctx, updated.ID, userID, respContent, respReasoning); err != nil {
 		s.logger.Printf("[AgentService] AppendAssistantMessage failed: %v", err)

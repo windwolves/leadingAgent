@@ -146,3 +146,8 @@ func (s *SessionService) GetMessages(ctx context.Context, sessionID, userID stri
 	}
 	return out, nil
 }
+
+// UpdateTokenUsage 更新 session 的累计 token 用量。
+func (s *SessionService) UpdateTokenUsage(ctx context.Context, sessionID, userID string, prompt, completion, total int) error {
+	return s.mgr.UpdateTokenUsage(ctx, sessionID, userID, int32(prompt), int32(completion), int32(total))
+}

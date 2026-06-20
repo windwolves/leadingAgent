@@ -15,6 +15,7 @@ import (
 	"leadingAgent/config"
 	"leadingAgent/handlers"
 	"leadingAgent/memory"
+	"leadingAgent/repository"
 	"leadingAgent/services"
 	"leadingAgent/session"
 )
@@ -152,18 +153,31 @@ func main() {
 	// 注入 remember_fact 工具的回调
 	tools.SetWriteMemoryFunc(memSvc.Remember)
 
-	// -------- 4) SessionService → AgentService → Handler --------
+	// -------- 4) Cost repository --------
+	costDBPath := os.Getenv("COST_DB")
+	if costDBPath == "" {
+		costDBPath = filepath.Join("data", "cost.db")
+	}
+	costRepo, err := repository.NewCostRepository(costDBPath)
+	if err != nil {
+		log.Fatalf("[Gateway] failed to open cost DB %q: %v", costDBPath, err)
+	}
+	defer costRepo.Close()
+	log.Printf("[Gateway] cost DB: %s", costDBPath)
+
+	// -------- 5) SessionService → AgentService → Handler --------
 	a := agent.NewAgent()
 	defer a.Close()
 
 	sessSvc := services.NewSessionService(mgr)
-	svc := services.NewAgentService(a, model, sessSvc, memSvc)
-	ah := handlers.NewAgentHandler(svc, sessSvc)
+	svc := services.NewAgentService(a, model, sessSvc, memSvc).WithCostRepo(costRepo)
+	ah := handlers.NewAgentHandler(svc, sessSvc, costRepo)
 
-	// -------- 5) 路由注册 --------
+	// -------- 6) 路由注册 --------
 	http.HandleFunc("/api/chat", ah.HandleChat)
 	http.HandleFunc("/api/sessions", ah.HandleSessions)
 	http.HandleFunc("/api/sessions/messages", ah.HandleGetSessionMessages)
+	http.HandleFunc("/api/costs", ah.HandleCosts)
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "ok")
 	})

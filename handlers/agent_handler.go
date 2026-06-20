@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"leadingAgent/agent"
+	"leadingAgent/repository"
 	"leadingAgent/services"
 )
 
@@ -22,17 +23,19 @@ type ChatRequest struct {
 // AgentHandler HTTP 层处理器，负责请求参数校验、SSE 流式响应编排和错误返回。
 // 对话业务委托给 services.AgentService，会话管理委托给 services.SessionService。
 type AgentHandler struct {
-	svc     *services.AgentService
-	sessSvc *services.SessionService
-	logger  *log.Logger
+	svc      *services.AgentService
+	sessSvc  *services.SessionService
+	costRepo repository.CostRepository
+	logger   *log.Logger
 }
 
 // NewAgentHandler 创建 HTTP 层处理器。
-func NewAgentHandler(svc *services.AgentService, sessSvc *services.SessionService) *AgentHandler {
+func NewAgentHandler(svc *services.AgentService, sessSvc *services.SessionService, costRepo repository.CostRepository) *AgentHandler {
 	return &AgentHandler{
-		svc:     svc,
-		sessSvc: sessSvc,
-		logger:  log.Default(),
+		svc:      svc,
+		sessSvc:  sessSvc,
+		costRepo: costRepo,
+		logger:   log.Default(),
 	}
 }
 
@@ -89,6 +92,33 @@ func (h *AgentHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			Content: err.Error(),
 		})
 	}
+}
+
+// HandleCosts 处理 GET /api/costs，返回所有 token 消耗记录。
+func (h *AgentHandler) HandleCosts(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.costRepo == nil {
+		http.Error(w, "cost repository not configured", http.StatusInternalServerError)
+		return
+	}
+
+	costs, err := h.costRepo.GetAll()
+	if err != nil {
+		h.logger.Printf("[AgentHandler] get costs error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"costs": costs})
 }
 
 // HandleSessions 处理 /api/sessions（GET 列表 / DELETE 删除）。

@@ -366,6 +366,30 @@ func (m *Manager) RecordError(ctx context.Context, id, userID string, threshold 
 	return m.repo.Update(ctx, s)
 }
 
+// UpdateTokenUsage 原子更新 session 的 TokenUsage 字段。
+func (m *Manager) UpdateTokenUsage(ctx context.Context, id, userID string, prompt, completion, total int32) error {
+	if id == "" {
+		return ErrInvalid
+	}
+	mu := m.lockFor(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	s, err := m.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if userID != "" && s.UserID != userID {
+		return ErrNotFound
+	}
+	s.TokenUsage.Prompt = prompt
+	s.TokenUsage.Completion = completion
+	s.TokenUsage.Total = total
+	s.UpdatedAt = time.Now().UTC()
+	s.Version++
+	return m.repo.Update(ctx, s)
+}
+
 func (m *Manager) transitionState(ctx context.Context, id, userID string, target SessionState) error {
 	mu := m.lockFor(id)
 	mu.Lock()

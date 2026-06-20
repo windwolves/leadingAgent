@@ -57,7 +57,17 @@ func createTable(db *sql.DB) error {
 	`
 
 	_, err := db.Exec(query)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add session_id column if it doesn't exist (migration for existing DBs).
+	// SQLite doesn't support IF NOT EXISTS on ADD COLUMN, so we ignore the error
+	// if the column already exists.
+	_, _ = db.Exec(`ALTER TABLE token_costs ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_token_costs_session_id ON token_costs(session_id)`)
+
+	return nil
 }
 
 func (r *costRepository) Save(cost *models.TokenCost) error {
@@ -70,14 +80,15 @@ func (r *costRepository) Save(cost *models.TokenCost) error {
 
 	query := `
 	INSERT OR REPLACE INTO token_costs (
-		id, request_id, provider, model, request_type, endpoint,
+		id, session_id, request_id, provider, model, request_type, endpoint,
 		prompt_tokens, completion_tokens, total_tokens, cache_hit, cache_read_tokens, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := r.db.Exec(
 		query,
 		cost.ID,
+		cost.SessionID,
 		cost.RequestID,
 		cost.Provider,
 		cost.Model,
@@ -95,8 +106,8 @@ func (r *costRepository) Save(cost *models.TokenCost) error {
 }
 
 func (r *costRepository) GetByRequestID(requestID string) (*models.TokenCost, error) {
-	query := `SELECT id, request_id, provider, model, request_type, endpoint, 
-		prompt_tokens, completion_tokens, total_tokens, cache_hit, cache_read_tokens, created_at 
+	query := `SELECT id, session_id, request_id, provider, model, request_type, endpoint,
+		prompt_tokens, completion_tokens, total_tokens, cache_hit, cache_read_tokens, created_at
 		FROM token_costs WHERE request_id = ?`
 
 	row := r.db.QueryRow(query, requestID)
@@ -107,6 +118,7 @@ func (r *costRepository) GetByRequestID(requestID string) (*models.TokenCost, er
 
 	err := row.Scan(
 		&cost.ID,
+		&cost.SessionID,
 		&cost.RequestID,
 		&cost.Provider,
 		&cost.Model,
@@ -138,8 +150,8 @@ func (r *costRepository) GetByRequestID(requestID string) (*models.TokenCost, er
 }
 
 func (r *costRepository) GetAll() ([]models.TokenCost, error) {
-	query := `SELECT id, request_id, provider, model, request_type, endpoint, 
-		prompt_tokens, completion_tokens, total_tokens, cache_hit, cache_read_tokens, created_at 
+	query := `SELECT id, session_id, request_id, provider, model, request_type, endpoint,
+		prompt_tokens, completion_tokens, total_tokens, cache_hit, cache_read_tokens, created_at
 		FROM token_costs ORDER BY created_at DESC`
 
 	rows, err := r.db.Query(query)
@@ -157,6 +169,7 @@ func (r *costRepository) GetAll() ([]models.TokenCost, error) {
 
 		err := rows.Scan(
 			&cost.ID,
+			&cost.SessionID,
 			&cost.RequestID,
 			&cost.Provider,
 			&cost.Model,

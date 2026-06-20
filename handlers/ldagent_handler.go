@@ -75,6 +75,7 @@ func (h *LdAgentHandler) Chat(ctx context.Context, request *services.ChatRequest
 
 		go func() {
 			cost := &models.TokenCost{
+				SessionID:        request.SessionId,
 				RequestID:        fmt.Sprintf("%d", ctx.Value("request_id")),
 				Provider:         "deepseek",
 				Model:            h.model,
@@ -160,6 +161,7 @@ func (h *LdAgentHandler) StreamChat(ctx context.Context, request *services.ChatR
 
 	go func() {
 		cost := &models.TokenCost{
+			SessionID:        request.SessionId,
 			RequestID:        fmt.Sprintf("%d", ctx.Value("request_id")),
 			Provider:         "deepseek",
 			Model:            h.model,
