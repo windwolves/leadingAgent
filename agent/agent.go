@@ -135,18 +135,21 @@ func (a *Agent) Close() error {
 }
 
 // WithCostSaver sets the cost saver callback and returns the agent for chaining.
-// NOT safe for concurrent use: Agent is a single shared instance; callers must
-// ensure requests are serialized or switch to per-request Agent instances before
-// enabling concurrent request handling.
+// Safe for concurrent use: writes are protected by usageMu, the same lock used
+// in accumulateUsage when reading these fields.
 func (a *Agent) WithCostSaver(fn CostSaver) *Agent {
+	a.usageMu.Lock()
 	a.saveCost = fn
+	a.usageMu.Unlock()
 	return a
 }
 
 // SetSessionID sets the session ID used when persisting cost records.
-// NOT safe for concurrent use: see WithCostSaver.
+// Safe for concurrent use: see WithCostSaver.
 func (a *Agent) SetSessionID(id string) {
+	a.usageMu.Lock()
 	a.sessionID = id
+	a.usageMu.Unlock()
 }
 
 // accumulateUsage records token counts from one model call and logs them.

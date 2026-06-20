@@ -275,11 +275,13 @@ func TestWithCostSaver_CalledOnAccumulateUsage(t *testing.T) {
 
 func TestWithCostSaver_NotCalledWhenNil(t *testing.T) {
 	a := NewAgent()
-	// No CostSaver set — accumulateUsage must not panic.
+	// No CostSaver set — accumulateUsage must not panic and must still accumulate.
 	a.accumulateUsage("callModel", "deepseek-chat", 10, 5)
 
-	// Give the goroutine scheduler a moment; no crash = pass.
-	time.Sleep(10 * time.Millisecond)
+	u := a.UsageSummary()
+	if u.TotalTokens != 15 {
+		t.Errorf("TotalTokens: got %d, want 15", u.TotalTokens)
+	}
 }
 
 func TestAccumulateUsage_CumulatesCorrectly(t *testing.T) {
