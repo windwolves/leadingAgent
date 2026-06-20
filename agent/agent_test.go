@@ -228,3 +228,73 @@ func TestExecute_ContextCancellation(t *testing.T) {
 		t.Fatalf("expected Canceled, got: %v", err)
 	}
 }
+
+func TestWithCostSaver_CalledOnAccumulateUsage(t *testing.T) {
+	type call struct {
+		caller, model, sessionID string
+		prompt, completion       int
+	}
+	var calls []call
+	done := make(chan struct{})
+
+	a := NewAgent()
+	a.SetSessionID("sess-123")
+	a.WithCostSaver(func(caller, model, sessionID string, prompt, completion int) {
+		calls = append(calls, call{caller, model, sessionID, prompt, completion})
+		close(done)
+	})
+
+	a.accumulateUsage("callModel", "deepseek-chat", 100, 50)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("CostSaver was not called within 1s")
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	c := calls[0]
+	if c.caller != "callModel" {
+		t.Errorf("caller: got %q, want %q", c.caller, "callModel")
+	}
+	if c.model != "deepseek-chat" {
+		t.Errorf("model: got %q, want %q", c.model, "deepseek-chat")
+	}
+	if c.sessionID != "sess-123" {
+		t.Errorf("sessionID: got %q, want %q", c.sessionID, "sess-123")
+	}
+	if c.prompt != 100 {
+		t.Errorf("prompt: got %d, want 100", c.prompt)
+	}
+	if c.completion != 50 {
+		t.Errorf("completion: got %d, want 50", c.completion)
+	}
+}
+
+func TestWithCostSaver_NotCalledWhenNil(t *testing.T) {
+	a := NewAgent()
+	// No CostSaver set — accumulateUsage must not panic.
+	a.accumulateUsage("callModel", "deepseek-chat", 10, 5)
+
+	// Give the goroutine scheduler a moment; no crash = pass.
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestAccumulateUsage_CumulatesCorrectly(t *testing.T) {
+	a := NewAgent()
+	a.accumulateUsage("callModel", "deepseek-chat", 100, 50)
+	a.accumulateUsage("critic", "deepseek-chat", 30, 20)
+
+	u := a.UsageSummary()
+	if u.PromptTokens != 130 {
+		t.Errorf("PromptTokens: got %d, want 130", u.PromptTokens)
+	}
+	if u.CompletionTokens != 70 {
+		t.Errorf("CompletionTokens: got %d, want 70", u.CompletionTokens)
+	}
+	if u.TotalTokens != 200 {
+		t.Errorf("TotalTokens: got %d, want 200", u.TotalTokens)
+	}
+}

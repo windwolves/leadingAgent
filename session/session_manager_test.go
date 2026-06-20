@@ -165,3 +165,55 @@ func TestGC(t *testing.T) {
 		t.Fatalf("expected EXPIRED, got %s", list[0].State)
 	}
 }
+
+func TestUpdateTokenUsage_PersistsToSession(t *testing.T) {
+	m := NewManager(NewInMemoryRepository(), WithTTL(time.Hour))
+	defer m.Close()
+
+	ctx := context.Background()
+	s, err := m.Create(ctx, "", "u1")
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	if err := m.UpdateTokenUsage(ctx, s.ID, "u1", 100, 50, 150); err != nil {
+		t.Fatalf("UpdateTokenUsage failed: %v", err)
+	}
+
+	got, err := m.Get(ctx, s.ID, "u1")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.TokenUsage.Prompt != 100 {
+		t.Errorf("Prompt: got %d, want 100", got.TokenUsage.Prompt)
+	}
+	if got.TokenUsage.Completion != 50 {
+		t.Errorf("Completion: got %d, want 50", got.TokenUsage.Completion)
+	}
+	if got.TokenUsage.Total != 150 {
+		t.Errorf("Total: got %d, want 150", got.TokenUsage.Total)
+	}
+}
+
+func TestUpdateTokenUsage_WrongUser(t *testing.T) {
+	m := NewManager(NewInMemoryRepository(), WithTTL(time.Hour))
+	defer m.Close()
+
+	ctx := context.Background()
+	s, _ := m.Create(ctx, "", "u1")
+
+	err := m.UpdateTokenUsage(ctx, s.ID, "other", 100, 50, 150)
+	if err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestUpdateTokenUsage_EmptyID(t *testing.T) {
+	m := NewManager(NewInMemoryRepository(), WithTTL(time.Hour))
+	defer m.Close()
+
+	err := m.UpdateTokenUsage(context.Background(), "", "u1", 100, 50, 150)
+	if err != ErrInvalid {
+		t.Fatalf("expected ErrInvalid, got %v", err)
+	}
+}
