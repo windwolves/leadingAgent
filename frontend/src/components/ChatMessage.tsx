@@ -16,8 +16,27 @@ interface ChatMessageProps {
   onDelete?: () => void
 }
 
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0')
+}
+
+function formatFullTimestamp(ts: number): string {
+  const d = new Date(ts)
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+}
+
+function formatRelativeTime(ts: number): string {
+  const diff = Date.now() - ts
+  const sec = Math.floor(diff / 1000)
+  if (sec < 60) return sec <= 0 ? 'just now' : `${sec}s ago`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} min${min === 1 ? '' : 's'} ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 10) return `${hr} hour${hr === 1 ? '' : 's'} ago`
+  // >= 10 hours: show short date + time
+  const d = new Date(ts)
+  return d.toLocaleDateString([], { month: '2-digit', day: '2-digit' }) + ' ' +
+    d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 function ThinkingBlock({ thinking }: { thinking: string }) {
@@ -81,8 +100,11 @@ function ChatMessage({ message, onDelete }: ChatMessageProps) {
         )}
       </div>
       {message.timestamp && (
-        <span className="mt-1 text-[11px] text-gray-600 select-none">
-          {formatTime(message.timestamp)}
+        <span
+          title={formatFullTimestamp(message.timestamp)}
+          className="mt-1 text-[11px] text-gray-600 select-none"
+        >
+          {formatRelativeTime(message.timestamp)}
         </span>
       )}
     </div>
