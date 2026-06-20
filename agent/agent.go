@@ -135,12 +135,16 @@ func (a *Agent) Close() error {
 }
 
 // WithCostSaver sets the cost saver callback and returns the agent for chaining.
+// NOT safe for concurrent use: Agent is a single shared instance; callers must
+// ensure requests are serialized or switch to per-request Agent instances before
+// enabling concurrent request handling.
 func (a *Agent) WithCostSaver(fn CostSaver) *Agent {
 	a.saveCost = fn
 	return a
 }
 
 // SetSessionID sets the session ID used when persisting cost records.
+// NOT safe for concurrent use: see WithCostSaver.
 func (a *Agent) SetSessionID(id string) {
 	a.sessionID = id
 }
