@@ -14,31 +14,41 @@ import (
 )
 
 const (
-	bingSearchEndpoint = "https://api.bing.microsoft.com/v7.0/search"
-	ddgSearchEndpoint  = "https://html.duckduckgo.com/html/"
+	serpAPIEndpoint     = "https://serpapi.com/search"
+	braveSearchEndpoint = "https://api.search.brave.com/res/v1/web/search"
+	ddgSearchEndpoint   = "https://html.duckduckgo.com/html/"
 )
 
-type BingSearchExecutor struct {
+type BraveSearchExecutor struct {
 	apiKey string
 	client *resty.Client
 }
 
-func NewBingSearchExecutor(apiKey string) *BingSearchExecutor {
-	return &BingSearchExecutor{
+func NewBraveSearchExecutor(apiKey string) *BraveSearchExecutor {
+	return &BraveSearchExecutor{
 		apiKey: apiKey,
 		client: resty.New().SetTimeout(10 * time.Second),
 	}
 }
 
-func NewBingSearchTool() *Tool {
-	apiKey := os.Getenv("BING_SEARCH_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("BING_API_KEY")
-	}
+type SerpAPIExecutor struct {
+	apiKey string
+	client *resty.Client
+}
 
+func NewSerpAPIExecutor(apiKey string) *SerpAPIExecutor {
+	return &SerpAPIExecutor{
+		apiKey: apiKey,
+		client: resty.New().SetTimeout(30 * time.Second),
+	}
+}
+
+func NewWebSearchTool() *Tool {
 	var executor ToolExecutor
-	if apiKey != "" {
-		executor = NewBingSearchExecutor(apiKey)
+	if apiKey := os.Getenv("SERPAPI_API_KEY"); apiKey != "" {
+		executor = NewSerpAPIExecutor(apiKey)
+	} else if apiKey := os.Getenv("BRAVE_API_KEY"); apiKey != "" {
+		executor = NewBraveSearchExecutor(apiKey)
 	} else {
 		executor = NewDuckDuckGoExecutor()
 	}
@@ -46,66 +56,44 @@ func NewBingSearchTool() *Tool {
 	return NewTool(
 		"web_search",
 		"search",
-		"Search the web using Bing Search API. Returns relevant web pages for the given query.",
+		"Search the web for relevant pages. Supports SerpAPI, Brave Search, and DuckDuckGo.",
 		[]ToolParameter{
 			{
 				Name:        "query",
 				Type:        "string",
-				Description: "The search query string (max 4096 characters)",
+				Description: "The search query string (max 400 characters)",
 				Required:    true,
 			},
 			{
 				Name:        "count",
 				Type:        "number",
-				Description: "Number of search results to return (1-50, default 5)",
+				Description: "Number of search results to return (1-20, default 10)",
 				Required:    false,
-				Default:     5,
-			},
-			{
-				Name:        "offset",
-				Type:        "number",
-				Description: "Zero-based offset for pagination",
-				Required:    false,
-				Default:     0,
-			},
-			{
-				Name:        "mkt",
-				Type:        "string",
-				Description: "Market code (e.g. zh-CN, en-US, default en-US)",
-				Required:    false,
-				Default:     "en-US",
+				Default:     10,
 			},
 		},
 		executor,
 	)
 }
 
-func (e *BingSearchExecutor) InputSchema() map[string]interface{} {
+func (e *BraveSearchExecutor) InputSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"query": map[string]interface{}{
 				"type":        "string",
-				"description": "The search query string (max 4096 characters)",
+				"description": "The search query string (max 400 characters)",
 			},
 			"count": map[string]interface{}{
 				"type":        "number",
-				"description": "Number of search results to return (1-50, default 5)",
-			},
-			"offset": map[string]interface{}{
-				"type":        "number",
-				"description": "Zero-based offset for pagination",
-			},
-			"mkt": map[string]interface{}{
-				"type":        "string",
-				"description": "Market code (e.g. zh-CN, en-US, default en-US)",
+				"description": "Number of search results to return (1-20, default 10)",
 			},
 		},
 		"required": []string{"query"},
 	}
 }
 
-func (e *BingSearchExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
+func (e *BraveSearchExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
 	startTime := time.Now()
 
 	query, ok := params["query"].(string)
@@ -115,7 +103,7 @@ func (e *BingSearchExecutor) Execute(ctx context.Context, params map[string]inte
 			"MISSING_PARAM", time.Since(startTime), "缺少查询参数")
 	}
 
-	count := 5
+	count := 10
 	if v, ok := params["count"]; ok {
 		switch val := v.(type) {
 		case float64:
@@ -127,95 +115,198 @@ func (e *BingSearchExecutor) Execute(ctx context.Context, params map[string]inte
 	if count < 1 {
 		count = 1
 	}
-	if count > 50 {
-		count = 50
-	}
-
-	offset := 0
-	if v, ok := params["offset"]; ok {
-		switch val := v.(type) {
-		case float64:
-			offset = int(val)
-		case int:
-			offset = val
-		}
-	}
-
-	mkt := "en-US"
-	if v, ok := params["mkt"].(string); ok && v != "" {
-		mkt = v
+	if count > 20 {
+		count = 20
 	}
 
 	resp, err := e.client.R().
 		SetContext(ctx).
-		SetHeader("Ocp-Apim-Subscription-Key", e.apiKey).
+		SetHeader("X-Subscription-Token", e.apiKey).
+		SetHeader("Accept", "application/json").
 		SetQueryParams(map[string]string{
-			"q":               query,
-			"count":           fmt.Sprintf("%d", count),
-			"offset":          fmt.Sprintf("%d", offset),
-			"mkt":             mkt,
-			"textDecorations": "true",
-			"textFormat":      "Raw",
+			"q":     query,
+			"count": fmt.Sprintf("%d", count),
 		}).
-		Get(bingSearchEndpoint)
+		Get(braveSearchEndpoint)
 
 	if err != nil {
 		return NewErrorResult("web_search", "search",
-			fmt.Sprintf("Search request failed: %v", err),
+			fmt.Sprintf("Brave search request failed: %v", err),
 			"REQUEST_FAILED", time.Since(startTime), "搜索请求失败")
 	}
 
 	if resp.IsError() {
 		return NewErrorResult("web_search", "search",
-			fmt.Sprintf("Bing API returned HTTP %d: %s", resp.StatusCode(), string(resp.Body())),
-			"API_ERROR", time.Since(startTime), "Bing API返回错误")
+			fmt.Sprintf("Brave API returned HTTP %d: %s", resp.StatusCode(), string(resp.Body())),
+			"API_ERROR", time.Since(startTime), "Brave API返回错误")
 	}
 
-	var bingResp BingSearchResponse
-	if err := json.Unmarshal(resp.Body(), &bingResp); err != nil {
+	var braveResp BraveSearchResponse
+	if err := json.Unmarshal(resp.Body(), &braveResp); err != nil {
 		return NewErrorResult("web_search", "search",
 			fmt.Sprintf("Failed to parse search response: %v", err),
 			"PARSE_FAILED", time.Since(startTime), "解析搜索结果失败")
 	}
 
-	items := make([]map[string]interface{}, 0, len(bingResp.WebPages.Value))
-	for _, page := range bingResp.WebPages.Value {
-		items = append(items, map[string]interface{}{
-			"name":              page.Name,
-			"url":               page.URL,
-			"snippet":           page.Snippet,
-			"display_url":       page.DisplayURL,
-			"date_last_crawled": page.DateLastCrawled,
-		})
+	items := make([]map[string]interface{}, 0, len(braveResp.Web.Results))
+	for _, r := range braveResp.Web.Results {
+		item := map[string]interface{}{
+			"title":   r.Title,
+			"url":     r.URL,
+			"snippet": r.Description,
+		}
+		if u, err := url.Parse(r.URL); err == nil {
+			item["display_url"] = u.Host + u.Path
+		}
+		items = append(items, item)
 	}
 
 	result := map[string]interface{}{
 		"query":            query,
-		"total_results":    bingResp.WebPages.TotalEstimatedMatches,
+		"total_results":    braveResp.Web.TotalResults,
 		"results_returned": len(items),
 		"items":            items,
-		"provider":         "bing",
+		"provider":         "brave",
 	}
 
 	return NewSuccessResult("web_search", "search", result, time.Since(startTime),
-		fmt.Sprintf("Bing搜索完成，找到约 %d 条相关结果，返回 %d 条", bingResp.WebPages.TotalEstimatedMatches, len(items)))
+		fmt.Sprintf("Brave搜索完成，找到约 %d 条相关结果，返回 %d 条", braveResp.Web.TotalResults, len(items)))
 }
 
-type BingSearchResponse struct {
-	WebPages BingWebPages `json:"webPages"`
+type BraveSearchResponse struct {
+	Web BraveWeb `json:"web"`
 }
 
-type BingWebPages struct {
-	TotalEstimatedMatches int64         `json:"totalEstimatedMatches"`
-	Value                 []BingWebPage `json:"value"`
+type BraveWeb struct {
+	TotalResults int64            `json:"total_results"`
+	Results      []BraveWebResult `json:"results"`
 }
 
-type BingWebPage struct {
-	Name            string `json:"name"`
-	URL             string `json:"url"`
-	DisplayURL      string `json:"displayUrl"`
-	Snippet         string `json:"snippet"`
-	DateLastCrawled string `json:"dateLastCrawled"`
+type BraveWebResult struct {
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Description string `json:"description"`
+}
+
+func (e *SerpAPIExecutor) InputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query": map[string]interface{}{
+				"type":        "string",
+				"description": "The search query string",
+			},
+			"count": map[string]interface{}{
+				"type":        "number",
+				"description": "Number of search results to return (1-100, default 10)",
+			},
+		},
+		"required": []string{"query"},
+	}
+}
+
+func (e *SerpAPIExecutor) Execute(ctx context.Context, params map[string]interface{}) ToolResult {
+	startTime := time.Now()
+
+	query, ok := params["query"].(string)
+	if !ok || query == "" {
+		return NewErrorResult("web_search", "search",
+			"Missing required parameter: query",
+			"MISSING_PARAM", time.Since(startTime), "缺少查询参数")
+	}
+
+	count := 10
+	if v, ok := params["count"]; ok {
+		switch val := v.(type) {
+		case float64:
+			count = int(val)
+		case int:
+			count = val
+		}
+	}
+	if count < 1 {
+		count = 1
+	}
+	if count > 100 {
+		count = 100
+	}
+
+	resp, err := e.client.R().
+		SetContext(ctx).
+		SetQueryParams(map[string]string{
+			"api_key": e.apiKey,
+			"engine":  "google",
+			"q":       query,
+			"num":     fmt.Sprintf("%d", count),
+			"gl":      "cn",
+			"hl":      "zh-cn",
+		}).
+		Get(serpAPIEndpoint)
+
+	if err != nil {
+		return NewErrorResult("web_search", "search",
+			fmt.Sprintf("SerpAPI request failed: %v", err),
+			"REQUEST_FAILED", time.Since(startTime), "搜索请求失败")
+	}
+
+	if resp.IsError() {
+		return NewErrorResult("web_search", "search",
+			fmt.Sprintf("SerpAPI returned HTTP %d: %s", resp.StatusCode(), string(resp.Body())),
+			"API_ERROR", time.Since(startTime), "SerpAPI返回错误")
+	}
+
+	var serpResp SerpAPIResponse
+	if err := json.Unmarshal(resp.Body(), &serpResp); err != nil {
+		return NewErrorResult("web_search", "search",
+			fmt.Sprintf("Failed to parse search response: %v", err),
+			"PARSE_FAILED", time.Since(startTime), "解析搜索结果失败")
+	}
+
+	items := make([]map[string]interface{}, 0, len(serpResp.OrganicResults))
+	for _, r := range serpResp.OrganicResults {
+		item := map[string]interface{}{
+			"title":   r.Title,
+			"url":     r.Link,
+			"snippet": r.Snippet,
+		}
+		if r.DisplayedLink != "" {
+			item["display_url"] = r.DisplayedLink
+		}
+		items = append(items, item)
+	}
+
+	totalResults := int64(len(items))
+	if serpResp.SearchInformation.TotalResults > 0 {
+		totalResults = serpResp.SearchInformation.TotalResults
+	}
+
+	result := map[string]interface{}{
+		"query":            query,
+		"total_results":    totalResults,
+		"results_returned": len(items),
+		"items":            items,
+		"provider":         "serpapi",
+	}
+
+	return NewSuccessResult("web_search", "search", result, time.Since(startTime),
+		fmt.Sprintf("SerpAPI搜索完成，找到约 %d 条相关结果，返回 %d 条", totalResults, len(items)))
+}
+
+type SerpAPIResponse struct {
+	SearchInformation SerpAPISearchInformation `json:"search_information"`
+	OrganicResults    []SerpAPIOrganicResult   `json:"organic_results"`
+}
+
+type SerpAPISearchInformation struct {
+	TotalResults int64 `json:"total_results"`
+}
+
+type SerpAPIOrganicResult struct {
+	Position      int    `json:"position"`
+	Title         string `json:"title"`
+	Link          string `json:"link"`
+	Snippet       string `json:"snippet"`
+	DisplayedLink string `json:"displayed_link"`
 }
 
 type DuckDuckGoExecutor struct {
@@ -268,7 +359,6 @@ func (e *DuckDuckGoExecutor) Execute(ctx context.Context, params map[string]inte
 		count = 1
 	}
 
-	// DuckDuckGo HTML 搜索（零依赖、真正的网页搜索结果）
 	resp, err := e.client.R().
 		SetContext(ctx).
 		SetQueryParam("q", query).
@@ -302,13 +392,6 @@ func (e *DuckDuckGoExecutor) Execute(ctx context.Context, params map[string]inte
 }
 
 // parseDDGHTML 从 DuckDuckGo HTML 搜索结果页提取标题、链接和摘要。
-// DDG HTML 页面结构示例：
-//
-//	<div class="result">
-//	  <a class="result__a" href="...">Title</a>
-//	  <a class="result__snippet">Snippet text...</a>
-//	  <a class="result__url">example.com/path</a>
-//	</div>
 func parseDDGHTML(body []byte, maxResults int) []map[string]interface{} {
 	doc, err := html.Parse(strings.NewReader(string(body)))
 	if err != nil {
@@ -321,14 +404,12 @@ func parseDDGHTML(body []byte, maxResults int) []map[string]interface{} {
 	var results []rawResult
 	var current *rawResult
 
-	// 跟踪我们是否在 result 容器内
 	var inResult bool
 	var inLink, inSnippet bool
 
 	var walk func(n *html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
-			// 检测 result 容器: <div class="result..."> 或 <div class="results_links...">
 			if n.Data == "div" {
 				for _, a := range n.Attr {
 					if a.Key == "class" && (strings.Contains(a.Val, "result") || strings.Contains(a.Val, "results_links")) {
@@ -342,7 +423,6 @@ func parseDDGHTML(body []byte, maxResults int) []map[string]interface{} {
 				}
 			}
 
-			// 标题链接: <a class="result__a" href="...">
 			if n.Data == "a" && inResult && current != nil {
 				for _, a := range n.Attr {
 					if a.Key == "class" && strings.Contains(a.Val, "result__a") {
@@ -387,12 +467,10 @@ func parseDDGHTML(body []byte, maxResults int) []map[string]interface{} {
 
 	walk(doc)
 
-	// 保存最后一个 result
 	if current != nil && current.url != "" {
 		results = append(results, *current)
 	}
 
-	// 转换为输出格式
 	items := make([]map[string]interface{}, 0, len(results))
 	for i, r := range results {
 		if i >= maxResults {

@@ -120,7 +120,7 @@ func loadTools() []Tool {
 		tools.NewStrReplaceTool(),
 		tools.NewGlobSearchTool(),
 		tools.NewGrepSearchTool(),
-		tools.NewBingSearchTool(),
+		tools.NewWebSearchTool(),
 		tools.NewRememberFactTool(),
 		tools.NewTopicFinderTool(),
 	}

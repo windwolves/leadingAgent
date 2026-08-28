@@ -57,3 +57,4 @@ data/sessions.db-wal
 gateway
 data/
 .trae/documents/
+.trae/
